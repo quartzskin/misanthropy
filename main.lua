@@ -6788,6 +6788,17 @@ do
 	-- was losing the fight most frames, which is why "Hide my real body"
 	-- wasn't reliably hiding anything.
 	local MS_RENDER_NAME = "MisanthropyModelSkinRender"
+	-- BindToRenderStep throws if this name is already bound (unlike
+	-- RunService.Event:Connect, which just adds another connection). Since
+	-- nothing in this file automatically re-runs a previous execution's
+	-- cleanups() list, re-running the whole script in the same session
+	-- (without a full rejoin) would still have the OLD run's binding
+	-- registered under this exact name and error out here, silently
+	-- halting every section defined after this one (Vault Sorter, Movement,
+	-- Position Visualizer, Configs, the splash screen - all of it). Evict
+	-- any stale binding first; unbinding a name that isn't bound is a safe
+	-- no-op, so this is harmless on a normal first run too.
+	pcall(function() RunService:UnbindFromRenderStep(MS_RENDER_NAME) end)
 	RunService:BindToRenderStep(MS_RENDER_NAME, Enum.RenderPriority.Character.Value + 1, function(dt: number)
 		local char = getCharacter()
 		local root = char and (char:FindFirstChild("HumanoidRootPart") :: BasePart?)
