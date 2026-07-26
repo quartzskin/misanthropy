@@ -11340,24 +11340,66 @@ do
 	-- widget used for rendering a 3D subject inside a 2D GUI panel, rebuilt
 	-- clean here from scratch for a completely different, cosmetic purpose
 	-- (nothing from ESPPreview's actual code was reused - it's gone, not
-	-- just unused, per the boundary documented in "How it loads"). Lives
-	-- inside msOvSettings (msOvSettings.Items["Content"] - confirmed exposed
-	-- the same way a real Section's Items["Content"] is, since
-	-- Toggle:Settings() does `Settingss.Items = SettingsItems` before
-	-- returning), so it only shows while "Mesh overlay" is on.
+	-- just unused, per the boundary documented in "How it loads"). Its own
+	-- floating, draggable window - parented straight to Library.Holder like
+	-- the Spotify/Watermark widgets, not tucked inside any Section or
+	-- Settings popup - since the point is to see it change live while
+	-- editing the ID fields without needing the settings cog open at all.
+	local previewWindow = Library:Create("Frame", {
+		Name = "\0",
+		Parent = Library.Holder.Instance,
+		Position = UDim2.new(0, 30, 0, 400),
+		Size = UDim2.new(0, 220, 0, 170),
+		BorderSizePixel = 0,
+		BackgroundColor3 = Library.Theme["Background"],
+	}):AddToTheme({ BackgroundColor3 = "Background" })
+	previewWindow:MakeDraggable()
+
+	Library:Create("UIStroke", {
+		Name = "\0",
+		Parent = previewWindow.Instance,
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+		LineJoinMode = Enum.LineJoinMode.Miter,
+		Color = Library.Theme["Outline"],
+	}):AddToTheme({ Color = "Outline" })
+
+	Library:Create("TextLabel", {
+		Name = "\0",
+		FontFace = Library.Font,
+		TextSize = Library.FontSize,
+		Parent = previewWindow.Instance,
+		TextColor3 = Library.Theme["Text"],
+		Text = "Mesh Preview",
+		BackgroundTransparency = 1,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Size = UDim2.new(1, -12, 0, 16),
+		Position = UDim2.new(0, 6, 0, 4),
+		BorderSizePixel = 0,
+	}):AddToTheme({ TextColor3 = "Text" })
+
 	local previewFrame = Instance.new("ViewportFrame")
 	previewFrame.Name = "MeshPreview"
-	previewFrame.Size = UDim2.new(1, 0, 0, 140)
+	previewFrame.Size = UDim2.new(1, -12, 1, -28)
+	previewFrame.Position = UDim2.new(0, 6, 0, 22)
 	previewFrame.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
 	previewFrame.BorderSizePixel = 0
 	previewFrame.Ambient = Color3.fromRGB(140, 140, 140)
 	previewFrame.LightColor = Color3.fromRGB(255, 255, 255)
 	previewFrame.LightDirection = Vector3.new(-1, -1, -1)
-	previewFrame.Parent = msOvSettings.Items["Content"].Instance
+	previewFrame.Parent = previewWindow.Instance
 
 	local previewCamera = Instance.new("Camera")
 	previewCamera.Parent = previewFrame
 	previewFrame.CurrentCamera = previewCamera
+
+	-- GetExtentsSize() is a Model method, not a BasePart one (BasePart has no
+	-- equivalent) - wrap the preview part in its own Model so
+	-- Model:GetBoundingBox() can be used instead, which does correctly
+	-- account for the SpecialMesh's actual rendered geometry, not just the
+	-- Part's own Size.
+	local previewModel = Instance.new("Model")
+	previewModel.Name = "PreviewModel"
+	previewModel.Parent = previewFrame
 
 	local previewPart = Instance.new("Part")
 	previewPart.Name = "PreviewMesh"
@@ -11366,7 +11408,8 @@ do
 	previewPart.Size = Vector3.new(1, 1, 1)
 	previewPart.Transparency = 1
 	previewPart.CastShadow = false
-	previewPart.Parent = previewFrame
+	previewPart.Parent = previewModel
+	previewModel.PrimaryPart = previewPart
 
 	local previewMesh = Instance.new("SpecialMesh")
 	previewMesh.MeshType = Enum.MeshType.FileMesh
@@ -11392,19 +11435,25 @@ do
 		if previewPart.Transparency < 1 then
 			previewSpin = (previewSpin + dt * 0.6) % (2 * math.pi)
 			previewPart.CFrame = CFrame.Angles(0, previewSpin, 0)
-			-- GetExtentsSize() reflects the mesh's actual rendered bounds, not
-			-- just the Part's own Size, so this auto-frames regardless of how
-			-- big or small the asset's native scale is.
-			local extents = previewPart:GetExtentsSize()
-			local radius = math.max(extents.X, extents.Y, extents.Z, 0.1)
+			local ok, _, size = pcall(function() return previewModel:GetBoundingBox() end)
+			local radius = (ok and size) and math.max(size.X, size.Y, size.Z, 0.1) or 2
 			local dist = radius * 1.8 + 1
 			previewCamera.CFrame = CFrame.new(Vector3.new(0, radius * 0.3, dist), Vector3.new(0, 0, 0))
 		end
 	end)
 	table.insert(cleanups, function()
 		rsPreview:Disconnect()
-		previewFrame:Destroy()
+		previewWindow.Instance:Destroy()
 	end)
+
+	local msPreviewShow = msSec:Toggle({
+		Name = "Show mesh preview",
+		Default = true,
+		Flag = "ms_preview_show",
+		Callback = function(v: boolean)
+			previewWindow.Instance.Visible = v
+		end,
+	})
 
 	local modelOverlay: Model? = nil
 	local modelParts: { BasePart } = {}
@@ -11585,7 +11634,7 @@ do
 
 	CFG.toggles.ms_mat_enabled = msMatEnabled; CFG.toggles.ms_tint = msTint
 	CFG.toggles.ms_overlay_on = msOverlayOn; CFG.toggles.ms_hidereal = msHideReal
-	CFG.toggles.ms_spin_on = msSpinOn
+	CFG.toggles.ms_spin_on = msSpinOn; CFG.toggles.ms_preview_show = msPreviewShow
 	CFG.sliders.ms_bodytrans = msBodyTrans; CFG.sliders.ms_scale = msScale
 	CFG.sliders.ms_xoff = msXOff; CFG.sliders.ms_yoff = msYOff; CFG.sliders.ms_zoff = msZOff
 	CFG.sliders.ms_pitch = msPitch; CFG.sliders.ms_yaw = msYaw; CFG.sliders.ms_roll = msRoll
@@ -11593,6 +11642,74 @@ do
 	CFG.dropdowns.ms_material = msMaterial; CFG.dropdowns.ms_overlay_type = msOverlayType
 	CFG.dropdowns.ms_spin_axis = msSpinAxis
 	CFG.colors.ms_matcolor = msMatColor
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5g2: Forcefield
+----------------------------------------------------------------------------------
+do
+	-- Uses Enum.Material.ForceField (the stock Roblox hex-pattern shield
+	-- render, already used by Model Skin's own "Material" dropdown above -
+	-- not the ForceField Instance class, which has no per-instance color and
+	-- would need parenting to the character anyway, breaking convention #1).
+	-- A Part with that Material tinted via .Color gives an authentic,
+	-- fully colorable shield look with zero texture-ID guessing. Same
+	-- follower-part-in-a-Workspace-folder pattern as every other
+	-- character-following cosmetic in this file - CFrame-matched to the
+	-- real HumanoidRootPart each frame, "server sided position" here just
+	-- means "my own real position," same as Model Skin's overlay rotation.
+	local ffSec = newSection(pgCharacter, "Forcefield")
+	local ffEnabled = ffSec:Toggle({ Name = "Enabled", Default = false, Flag = "ff_enabled" })
+	local ffColor = newColorpicker(ffSec, { Name = "Color", Default = Color3.fromRGB(90, 170, 255), Alpha = 1, Flag = "ff_color" })
+	local ffSettings = settingsOf(ffSec, ffEnabled)
+	local ffSize    = ffSettings:Slider({ Name = "Size", Min = 10, Max = 300, Step = 5, Default = 100, Suffix = "%", Flag = "ff_size" })
+	local ffTrans   = ffSettings:Slider({ Name = "Transparency", Min = 0, Max = 90, Step = 5, Default = 40, Suffix = "%", Flag = "ff_trans" })
+	local ffRainbow = ffSettings:Toggle({ Name = "Rainbow", Default = false, Flag = "ff_rainbow" })
+
+	local ffFolder = Instance.new("Folder")
+	ffFolder.Name = "MisanthropyForcefield"
+	ffFolder.Parent = Workspace
+	table.insert(cleanups, function() if ffFolder then ffFolder:Destroy() end end)
+
+	local ffBall = Instance.new("Part")
+	ffBall.Name = "Forcefield"
+	ffBall.Shape = Enum.PartType.Ball
+	ffBall.Material = Enum.Material.ForceField
+	ffBall.Anchored = true
+	ffBall.CanCollide = false; ffBall.CanQuery = false; ffBall.CanTouch = false; ffBall.Massless = true
+	ffBall.CastShadow = false
+	ffBall.Transparency = 1
+	ffBall.Parent = ffFolder
+
+	local lastFfSig = ""
+	local rsFf = RunService.Heartbeat:Connect(function()
+		local root = getRootPart()
+		if not ffEnabled:Get() or not root then
+			if ffBall.Transparency ~= 1 then ffBall.Transparency = 1 end
+			return
+		end
+
+		local sz = (ffSize:Get() / 100) * 6
+		local trans = ffTrans:Get() / 100
+		local col = ffRainbow:Get() and Color3.fromHSV((os.clock() * 0.15) % 1, 0.85, 1) or ffColor:Get()
+
+		local sig = string.format("%.2f|%.2f|%s", sz, trans, col:ToHex())
+		if sig ~= lastFfSig then
+			lastFfSig = sig
+			ffBall.Size = Vector3.new(sz, sz, sz)
+			ffBall.Color = col
+			ffBall.Transparency = trans
+		end
+
+		ffBall.CFrame = root.CFrame
+	end)
+	table.insert(cleanups, function()
+		rsFf:Disconnect()
+	end)
+
+	CFG.toggles.ff_enabled = ffEnabled; CFG.toggles.ff_rainbow = ffRainbow
+	CFG.sliders.ff_size = ffSize; CFG.sliders.ff_trans = ffTrans
+	CFG.colors.ff_color = ffColor
 end
 
 ----------------------------------------------------------------------------------
