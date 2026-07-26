@@ -317,7 +317,7 @@ local Library do
 
     local Themes = {
         ["Preset"] = {
-            ["Accent"] = FromRGB(0, 0, 0),
+            ["Accent"] = FromRGB(235, 235, 235),
         }
     }
 
@@ -6309,116 +6309,6 @@ do
 end
 
 ----------------------------------------------------------------------------------
--- SECTION 5c: China Hat (Drawing-based cone of lines from apex to base ring)
-----------------------------------------------------------------------------------
-do
-	local chSec = newSection(pgCharacter, "China Hat")
-
-	local chEnabled = chSec:Toggle({ Name = "Enabled", Default = false, Flag = "ch_enabled" })
-	local chColor   = newColorpicker(chSec, { Name = "Color", Default = Color3.fromRGB(255, 255, 255), Alpha = 1, Flag = "ch_color" })
-
-	local chSettings = settingsOf(chSec, chEnabled)
-	local chRadius  = chSettings:Slider({ Name = "Radius", Min = 50, Max = 500, Step = 5, Default = 200, Suffix = "%", Flag = "ch_radius" })
-	local chHeight  = chSettings:Slider({ Name = "Height", Min = 50, Max = 400, Step = 5, Default = 150, Suffix = "%", Flag = "ch_height" })
-	local chSpin    = chSettings:Slider({ Name = "Spin speed", Min = 0, Max = 300, Step = 5, Default = 0, Suffix = "%", Flag = "ch_spin" })
-	local chThick   = chSettings:Slider({ Name = "Thickness", Min = 50, Max = 400, Step = 5, Default = 100, Suffix = "%", Flag = "ch_thick" })
-	local chGlow    = chSettings:Toggle({ Name = "Glow layer", Default = true, Flag = "ch_glow" })
-	local chRainbow = chSettings:Toggle({ Name = "Rainbow", Default = false, Flag = "ch_rainbow" })
-	local chRbSpeed = chSettings:Slider({ Name = "Rainbow speed", Min = 5, Max = 200, Step = 5, Default = 50, Suffix = "%", Flag = "ch_rbspeed" })
-
-	local SEGMENTS = 60
-	local TAU = math.pi * 2
-
-	local hasDrawing = (Drawing ~= nil)
-	if not hasDrawing then
-		notify("China Hat", "This executor has no Drawing API - hat unavailable")
-	end
-
-	local GuiService = game:GetService("GuiService")
-	local guiInset = GuiService:GetGuiInset()
-	local function worldToScreen(worldPos: Vector3): (number, number, boolean)
-		local cam = Workspace.CurrentCamera
-		if not cam then return 0, 0, false end
-		local sp = cam:WorldToViewportPoint(worldPos)
-		return sp.X + guiInset.X, sp.Y + guiInset.Y, sp.Z > 0
-	end
-
-	type Seg = { core: any, glow: any }
-	local segs: { Seg } = {}
-	if hasDrawing then
-		for _ = 1, SEGMENTS do
-			local glow = Drawing.new("Line")
-			glow.Thickness = 4; glow.Transparency = 0.4; glow.Visible = false
-			local core = Drawing.new("Line")
-			core.Thickness = 1.5; core.Transparency = 1; core.Visible = false
-			table.insert(segs, { core = core, glow = glow })
-		end
-		table.insert(cleanups, function()
-			for _, s in ipairs(segs) do
-				pcall(function() s.core:Remove() end)
-				pcall(function() s.glow:Remove() end)
-			end
-		end)
-	end
-
-	local function hideAll()
-		for _, s in ipairs(segs) do s.core.Visible = false; s.glow.Visible = false end
-	end
-
-	if hasDrawing then
-		local rs6 = RunService.RenderStepped:Connect(function()
-			if not chEnabled:Get() then hideAll(); return end
-			local char = getCharacter()
-			local head = char and (char:FindFirstChild("Head") :: BasePart?)
-			if not head then hideAll(); return end
-
-			local timeClock = os.clock()
-			local col = chRainbow:Get()
-				and Color3.fromHSV((timeClock * (chRbSpeed:Get() / 100) * 0.15) % 1, 0.9, 1)
-				or chColor:Get()
-
-			local headPos = head.Position
-			local radius = chRadius:Get() / 100
-			local height = chHeight:Get() / 100
-			local spin = timeClock * (chSpin:Get() / 100)
-			local thickMul = chThick:Get() / 100
-			local glowOn = chGlow:Get()
-
-			local apexWorld = headPos + Vector3.new(0, height, 0)
-			local ax, ay, apexVis = worldToScreen(apexWorld)
-			if not apexVis then hideAll(); return end
-			local apex = Vector2.new(ax, ay)
-
-			for i = 1, SEGMENTS do
-				local s = segs[i]
-				local angle = (i / SEGMENTS) * TAU + spin
-				local baseWorld = headPos + Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
-				local bx, by, vis = worldToScreen(baseWorld)
-				if vis then
-					local base = Vector2.new(bx, by)
-					s.core.From = apex; s.core.To = base
-					s.core.Color = col; s.core.Thickness = 1.5 * thickMul; s.core.Visible = true
-					if glowOn then
-						s.glow.From = apex; s.glow.To = base
-						s.glow.Color = col; s.glow.Thickness = 4 * thickMul; s.glow.Visible = true
-					else
-						s.glow.Visible = false
-					end
-				else
-					s.core.Visible = false; s.glow.Visible = false
-				end
-			end
-		end)
-		table.insert(cleanups, function() rs6:Disconnect() end)
-	end
-
-	CFG.toggles.ch_enabled = chEnabled; CFG.toggles.ch_glow = chGlow; CFG.toggles.ch_rainbow = chRainbow
-	CFG.sliders.ch_radius = chRadius; CFG.sliders.ch_height = chHeight; CFG.sliders.ch_spin = chSpin
-	CFG.sliders.ch_thick = chThick; CFG.sliders.ch_rbspeed = chRbSpeed
-	CFG.colors.ch_color = chColor
-end
-
-----------------------------------------------------------------------------------
 -- SECTION 5d: Aspect Ratio
 ----------------------------------------------------------------------------------
 do
@@ -6490,6 +6380,7 @@ do
 
 	emSec:Label("Animation / Emote ID")
 	local emId       = emSec:Textbox({ Default = "", Placeholder = "e.g. 507770239", Flag = "em_id" })
+	local nowPlayingLabel = emSec:Label("Now playing: (nothing)")
 	local emLoop     = emSec:Toggle({ Name = "Loop", Default = true, Flag = "em_loop" })
 
 	local emSettings = settingsOf(emSec, emLoop)
@@ -6498,6 +6389,26 @@ do
 
 	local currentTrack: AnimationTrack? = nil
 	local animInstance: Animation? = nil
+
+	-- populated by "Scan game animations" below; playEmote() consults this
+	-- so the "now playing" readout can show a real name, not just the ID.
+	local foundAnims: { { label: string, id: string } } = {}
+	local pickIndex = 0
+
+	local function labelForId(id: string): string
+		for _, a in ipairs(foundAnims) do
+			if a.id == id then return a.label end
+		end
+		return "Custom"
+	end
+
+	local function updateNowPlaying(name: string?, id: string?)
+		if id then
+			nowPlayingLabel:SetText(("Now playing: %s  (%s)"):format(name or "Custom", id))
+		else
+			nowPlayingLabel:SetText("Now playing: (nothing)")
+		end
+	end
 
 	local function getAnimator(): Animator?
 		local char = getCharacter()
@@ -6513,6 +6424,7 @@ do
 			pcall(function() currentTrack:Stop(0.2) end)
 			currentTrack = nil
 		end
+		updateNowPlaying(nil, nil)
 	end
 
 	local function playEmote()
@@ -6549,14 +6461,21 @@ do
 		track.Looped = emLoop:Get()
 		track:Play(0.15)
 		track:AdjustSpeed(emSpeed:Get() / 100)
+
+		local name = labelForId(id)
+		updateNowPlaying(name, id)
 		notify("Emotes", "Playing " .. id)
+
+		track.Stopped:Connect(function()
+			if currentTrack == track then
+				currentTrack = nil
+				updateNowPlaying(nil, nil)
+			end
+		end)
 	end
 
 	emSec:Button({ Name = "Play", Callback = playEmote })
 	emSec:Button({ Name = "Stop", Callback = stopEmote })
-
-	local foundAnims: { { label: string, id: string } } = {}
-	local pickIndex = 0
 
 	local function scanGameAnims()
 		table.clear(foundAnims)
@@ -6613,124 +6532,6 @@ do
 	CFG.toggles.em_loop = emLoop
 	CFG.sliders.em_speed = emSpeed
 	CFG.dropdowns.em_priority = emPriority
-end
-
-----------------------------------------------------------------------------------
--- SECTION 5f: Halo (glowing Drawing-based ring above your head) - broken atm.
-----------------------------------------------------------------------------------
-do
-	local haSec = newSection(pgCharacter, "Halo")
-
-	local haEnabled = haSec:Toggle({ Name = "Enabled", Default = false, Flag = "ha_enabled" })
-	local haCore    = newColorpicker(haSec, { Name = "Core color", Default = Color3.fromRGB(255, 255, 240), Alpha = 1, Flag = "ha_core" })
-	local haGlow    = newColorpicker(haSec, { Name = "Glow color", Default = Color3.fromRGB(255, 190, 30), Alpha = 1, Flag = "ha_glow" })
-
-	local haSettings = settingsOf(haSec, haEnabled)
-	local haRadius   = haSettings:Slider({ Name = "Radius", Min = 20, Max = 250, Step = 5, Default = 85, Suffix = "%", Flag = "ha_radius" })
-	local haHeight   = haSettings:Slider({ Name = "Height", Min = 50, Max = 300, Step = 5, Default = 135, Suffix = "ds", Flag = "ha_height" })
-	local haSpin     = haSettings:Slider({ Name = "Spin speed", Min = 0, Max = 300, Step = 5, Default = 100, Suffix = "%", Flag = "ha_spin" })
-	local haBobSpd   = haSettings:Slider({ Name = "Bob speed", Min = 0, Max = 200, Step = 5, Default = 100, Suffix = "%", Flag = "ha_bobspd" })
-	local haBobH     = haSettings:Slider({ Name = "Bob height", Min = 0, Max = 50, Step = 1, Default = 8, Suffix = "ds", Flag = "ha_bobh" })
-	local haThick    = haSettings:Slider({ Name = "Thickness", Min = 50, Max = 250, Step = 5, Default = 100, Suffix = "%", Flag = "ha_thick" })
-	local haRainbow  = haSettings:Toggle({ Name = "Rainbow glow", Default = false, Flag = "ha_rainbow" })
-	local haRbSpeed  = haSettings:Slider({ Name = "Rainbow speed", Min = 5, Max = 200, Step = 5, Default = 50, Suffix = "%", Flag = "ha_rbspeed" })
-
-	local SEGMENTS = 60
-	local TAU = math.pi * 2
-
-	local hasDrawing = (Drawing ~= nil)
-	if not hasDrawing then
-		notify("Halo", "This executor has no Drawing API - halo unavailable")
-	end
-
-	type Seg = { core: any, glowIn: any, glowOut: any }
-	local segs: { Seg } = {}
-
-	if hasDrawing then
-		for _ = 1, SEGMENTS do
-			local glowOut = Drawing.new("Line")
-			glowOut.Thickness = 14.0; glowOut.Transparency = 0.25; glowOut.Visible = false
-			local glowIn = Drawing.new("Line")
-			glowIn.Thickness = 8.0; glowIn.Transparency = 0.55; glowIn.Visible = false
-			local core = Drawing.new("Line")
-			core.Thickness = 3.5; core.Transparency = 1.0; core.Visible = false
-			table.insert(segs, { core = core, glowIn = glowIn, glowOut = glowOut })
-		end
-		table.insert(cleanups, function()
-			for _, s in ipairs(segs) do
-				pcall(function() s.core:Remove() end)
-				pcall(function() s.glowIn:Remove() end)
-				pcall(function() s.glowOut:Remove() end)
-			end
-		end)
-	end
-
-	local GuiService = game:GetService("GuiService")
-	local guiInset = GuiService:GetGuiInset()
-	local function worldToScreen(worldPos: Vector3): (number, number, boolean)
-		local cam = Workspace.CurrentCamera
-		if not cam then return 0, 0, false end
-		local sp = cam:WorldToViewportPoint(worldPos)
-		return sp.X + guiInset.X, sp.Y + guiInset.Y, sp.Z > 0
-	end
-
-	local function hideAll()
-		for _, s in ipairs(segs) do
-			s.core.Visible = false; s.glowIn.Visible = false; s.glowOut.Visible = false
-		end
-	end
-
-	if hasDrawing then
-		local rs9 = RunService.RenderStepped:Connect(function()
-			if not haEnabled:Get() then hideAll(); return end
-			local char = getCharacter()
-			local head = char and (char:FindFirstChild("Head") :: BasePart?)
-			if not head then hideAll(); return end
-
-			local timeClock = os.clock()
-			local coreCol = haCore:Get()
-			local glowCol = haRainbow:Get()
-				and Color3.fromHSV((timeClock * (haRbSpeed:Get() / 100) * 0.15) % 1, 0.9, 1)
-				or haGlow:Get()
-
-			local radius = haRadius:Get() / 100
-			local baseHeight = haHeight:Get() / 100
-			local spin = timeClock * (haSpin:Get() / 100)
-			local bob = math.sin(timeClock * (haBobSpd:Get() / 100) * 2.8) * (haBobH:Get() / 100)
-			local center = head.Position + Vector3.new(0, baseHeight + bob, 0)
-			local thickMul = haThick:Get() / 100
-
-			for i = 1, SEGMENTS do
-				local s = segs[i]
-				local a0 = ((i / SEGMENTS) * TAU) + spin
-				local a1 = (((i + 1) / SEGMENTS) * TAU) + spin
-				local w0 = center + Vector3.new(math.cos(a0) * radius, 0, math.sin(a0) * radius)
-				local w1 = center + Vector3.new(math.cos(a1) * radius, 0, math.sin(a1) * radius)
-				local x0, y0, front0 = worldToScreen(w0)
-				local x1, y1, front1 = worldToScreen(w1)
-
-				if front0 and front1 then
-					local from = Vector2.new(x0, y0)
-					local to = Vector2.new(x1, y1)
-					s.glowOut.From = from; s.glowOut.To = to
-					s.glowOut.Color = glowCol; s.glowOut.Thickness = 14.0 * thickMul; s.glowOut.Visible = true
-					s.glowIn.From = from; s.glowIn.To = to
-					s.glowIn.Color = glowCol; s.glowIn.Thickness = 8.0 * thickMul; s.glowIn.Visible = true
-					s.core.From = from; s.core.To = to
-					s.core.Color = coreCol; s.core.Thickness = 3.5 * thickMul; s.core.Visible = true
-				else
-					s.core.Visible = false; s.glowIn.Visible = false; s.glowOut.Visible = false
-				end
-			end
-		end)
-		table.insert(cleanups, function() rs9:Disconnect() end)
-	end
-
-	CFG.toggles.ha_enabled = haEnabled; CFG.toggles.ha_rainbow = haRainbow
-	CFG.sliders.ha_radius = haRadius; CFG.sliders.ha_height = haHeight; CFG.sliders.ha_spin = haSpin
-	CFG.sliders.ha_bobspd = haBobSpd; CFG.sliders.ha_bobh = haBobH; CFG.sliders.ha_thick = haThick
-	CFG.sliders.ha_rbspeed = haRbSpeed
-	CFG.colors.ha_core = haCore; CFG.colors.ha_glow = haGlow
 end
 
 ----------------------------------------------------------------------------------
