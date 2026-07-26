@@ -9659,18 +9659,23 @@ Library.Get = function(self)
 end
 
 -- Library.Holder (the embed's own ScreenGui, parented to gethui()/CoreGui) is
--- created with no explicit DisplayOrder, defaulting to 0. That's a real
--- problem here: this file's own "screen" ScreenGui (built further down, used
--- for the splash screen / HP vignette flash / Image overlay) sits at
--- DisplayOrder 9999, and nhack's own UI is a separate, unreadable-to-us
--- ScreenGui that could be set to anything. Whichever of those actually ends
--- up on top can also end up eating this window's clicks even while it's
--- still visible underneath - Roblox delivers input to whatever's topmost by
--- DisplayOrder, not by what looks visually on top to a human. Toggles/
--- sliders rendering fine but never responding to clicks or drags is exactly
--- what that looks like. Force this window's DisplayOrder to Int32's actual
--- max so nothing in this file (or nhack) can ever end up above it again.
-Library.Holder.Instance.DisplayOrder = 2147483647
+-- created with no explicit DisplayOrder, defaulting to 0. This file's own
+-- "screen" ScreenGui (built further down, used for the splash screen / HP
+-- vignette flash / Image overlay) sits at DisplayOrder 9999 - match it
+-- rather than going above it, since going all the way to Int32 max (tried
+-- earlier while chasing an unrelated unresponsive-UI report) put this menu
+-- on top of literally everything, which wasn't wanted; the actual fix for
+-- that report turned out to be the Library.Round NaN bug above, not this.
+Library.Holder.Instance.DisplayOrder = 9999
+
+-- User asked for the library's own decorative background blur + falling
+-- snow (both on by default - Library.BackgroundBlurEnabled/
+-- BackgroundSnowEnabled) to be off. Both are read live by
+-- Library:SetBackgroundEffectsVisible, which Window:SetOpen calls every
+-- time the window opens/closes, so setting the flags before the window
+-- ever opens is enough - no need to call SetBackgroundEffectsVisible here.
+Library.BackgroundBlurEnabled = false
+Library.BackgroundSnowEnabled = false
 
 -- Every feature below is hosted in its own window from the embedded UI
 -- library instead of nhack's Lua tab. nhack keeps a "misanthropy" tab
@@ -9678,6 +9683,16 @@ Library.Holder.Instance.DisplayOrder = 2147483647
 -- exposes no rename API for it), but that tab now holds nothing except a
 -- toggle for the window's visibility.
 local Window = Library:Window({ Title = "misanthropy.lua", ButtonName = "misanthropy.lua" })
+
+-- User asked for the window's own outer border to be off too. MainFrame's
+-- constructor creates two UIStrokes (Outline + Border theme colors) directly
+-- on itself anonymously - not exposed by name through Window.Items - so
+-- reach them the only way available: filter MainFrame's own children.
+for _, child in Window.Items["MainFrame"].Instance:GetChildren() do
+	if child:IsA("UIStroke") then
+		child.Enabled = false
+	end
+end
 
 -- This library ships its own hardcoded "X toggles the window" shortcut
 -- (Library.MenuKeybind, default Enum.KeyCode.X). Same reasoning as the
@@ -9780,7 +9795,11 @@ local CFG = { toggles = {}, sliders = {}, dropdowns = {}, colors = {} }
 -- :Get() here that returns those two, same call shape every existing
 -- section already expects (local col, alpha = picker:Get()).
 local function newColorpicker(parent: any, opts: any): any
-	local picker = parent:Label(opts.Name):Colorpicker({
+	-- Library.Label takes a Params TABLE (Params.Name), not a bare string -
+	-- a bare string indexed with .Name in Lua just returns nil, which is why
+	-- every colorpicker/textbox label in this file was rendering the literal
+	-- fallback text "Label" instead of its real name.
+	local picker = parent:Label({ Name = opts.Name }):Colorpicker({
 		Flag = opts.Flag or opts.Name,
 		Default = opts.Default or Color3.new(1, 1, 1),
 		Alpha = 0,
@@ -9793,9 +9812,10 @@ local function newColorpicker(parent: any, opts: any): any
 end
 
 -- This library's Textbox also has no caption of its own (same limitation
--- as chudvision's), so this still prepends a :Label(opts.Name) call.
+-- as chudvision's), so this still prepends a :Label(...) call - see the
+-- Params-table note in newColorpicker above for why it's {Name=...} now.
 local function newTextInput(parent: any, opts: any): any
-	parent:Label(opts.Name)
+	parent:Label({ Name = opts.Name })
 	return parent:Textbox(opts)
 end
 
@@ -9823,7 +9843,7 @@ local TR_STYLES = { "Solid", "Taper", "Comet", "Ribbon" }
 
 local trEnabled = trSec:Toggle({ Name = "Enabled", Default = false, Flag = "tr_enabled" })
 local trStyle   = trSec:Dropdown({ Name = "Style", Items = TR_STYLES, Default = "Taper", Flag = "tr_style" })
-local trColor   = newColorpicker(trSec, { Name = "Color",   Default = Color3.fromRGB(190, 120, 255), Alpha = 1, Flag = "tr_color" })
+local trColor   = newColorpicker(trSec, { Name = "Color 1", Default = Color3.fromRGB(190, 120, 255), Alpha = 1, Flag = "tr_color" })
 local trColor2  = newColorpicker(trSec, { Name = "Color 2", Default = Color3.fromRGB(120, 170, 255), Alpha = 1, Flag = "tr_color2" })
 
 local trSettings = settingsOf(trSec, trEnabled)
@@ -9923,7 +9943,7 @@ local PA_MOTION = { "Off", "Orbit", "Spiral Up", "Spiral Down", "Helix", "Wave",
 local paEnabled = paSec:Toggle({ Name = "Enabled", Default = false, Flag = "pa_enabled" })
 local paPreset  = paSec:Dropdown({ Name = "Preset", Items = PA_ORDER, Default = "Glow", Flag = "pa_preset" })
 local paMotion  = paSec:Dropdown({ Name = "Motion", Items = PA_MOTION, Default = "Orbit", Flag = "pa_motion" })
-local paColor   = newColorpicker(paSec, { Name = "Color",   Default = Color3.fromRGB(120, 170, 255), Alpha = 1, Flag = "pa_color" })
+local paColor   = newColorpicker(paSec, { Name = "Color 1", Default = Color3.fromRGB(120, 170, 255), Alpha = 1, Flag = "pa_color" })
 local paColor2  = newColorpicker(paSec, { Name = "Color 2", Default = Color3.fromRGB(190, 120, 255), Alpha = 1, Flag = "pa_color2" })
 
 local paSettings = settingsOf(paSec, paEnabled)
@@ -10228,7 +10248,7 @@ do
 
 	local adEnabled = adSec:Toggle({ Name = "Enabled", Default = false, Flag = "ad_enabled" })
 	local adStyle   = adSec:Dropdown({ Name = "Style", Items = AD_STYLES, Default = "Orbit", Flag = "ad_style" })
-	local adColor   = newColorpicker(adSec, { Name = "Color",   Default = Color3.fromRGB(120, 170, 255), Alpha = 1, Flag = "ad_color" })
+	local adColor   = newColorpicker(adSec, { Name = "Color 1", Default = Color3.fromRGB(120, 170, 255), Alpha = 1, Flag = "ad_color" })
 	local adColor2  = newColorpicker(adSec, { Name = "Color 2", Default = Color3.fromRGB(190, 120, 255), Alpha = 1, Flag = "ad_color2" })
 
 	local adSettings = settingsOf(adSec, adEnabled)
@@ -10547,7 +10567,7 @@ do
 	local imgSpin    = imgSettings:Toggle({ Name = "Spin", Default = false, Flag = "img_spin" })
 	local imgPulse   = imgSettings:Toggle({ Name = "Pulse", Default = false, Flag = "img_pulse" })
 	local imgAnimSpd = imgSettings:Slider({ Name = "Anim speed", Min = 5, Max = 200, Step = 5, Default = 50, Suffix = "%", Flag = "img_anim_spd" })
-	imgSettings:Label("Image URL")
+	imgSettings:Label({ Name = "Image URL" })
 	local imgUrlBox = imgSettings:Textbox({ Default = "", Placeholder = "https://...", Flag = "img_url" })
 	imgSettings:Button({ Name = "Load typed URL", Callback = function() loadImageURL(imgUrlBox:Get()) end })
 	imgSettings:Button({ Name = "Load URL from clipboard", Callback = function() loadImageURL(clipText()) end })
@@ -11056,9 +11076,9 @@ do
 		["Core (takeover)"]    = Enum.AnimationPriority.Core,
 	}
 
-	emSec:Label("Animation / Emote ID")
+	emSec:Label({ Name = "Animation / Emote ID" })
 	local emId       = emSec:Textbox({ Default = "", Placeholder = "e.g. 507770239", Flag = "em_id" })
-	local nowPlayingLabel = emSec:Label("Now playing: (nothing)")
+	local nowPlayingLabel = emSec:Label({ Name = "Now playing: (nothing)" })
 	local emLoop     = emSec:Toggle({ Name = "Loop", Default = true, Flag = "em_loop" })
 
 	local emSettings = settingsOf(emSec, emLoop)
@@ -14218,7 +14238,7 @@ do
 		notify("Vault Sorter", "Vault sorted.")
 	end
 
-	vsSec:Label("Sorts your own vault by category, cost, durability, skin and amount.")
+	vsSec:Label({ Name = "Sorts your own vault by category, cost, durability, skin and amount." })
 	vsSec:Button({ Name = "Sort Vault", Callback = function()
 		task.spawn(sortVault)
 	end })
