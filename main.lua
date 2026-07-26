@@ -11334,6 +11334,78 @@ do
 		end
 	end
 
+	-- Live preview of the mesh/texture ID before it's ever applied to the
+	-- character - a ViewportFrame + Camera + a single mesh Part, the same
+	-- general technique the vendored library's own (stripped) ESPPreview
+	-- widget used for rendering a 3D subject inside a 2D GUI panel, rebuilt
+	-- clean here from scratch for a completely different, cosmetic purpose
+	-- (nothing from ESPPreview's actual code was reused - it's gone, not
+	-- just unused, per the boundary documented in "How it loads"). Lives
+	-- inside msOvSettings (msOvSettings.Items["Content"] - confirmed exposed
+	-- the same way a real Section's Items["Content"] is, since
+	-- Toggle:Settings() does `Settingss.Items = SettingsItems` before
+	-- returning), so it only shows while "Mesh overlay" is on.
+	local previewFrame = Instance.new("ViewportFrame")
+	previewFrame.Name = "MeshPreview"
+	previewFrame.Size = UDim2.new(1, 0, 0, 140)
+	previewFrame.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
+	previewFrame.BorderSizePixel = 0
+	previewFrame.Ambient = Color3.fromRGB(140, 140, 140)
+	previewFrame.LightColor = Color3.fromRGB(255, 255, 255)
+	previewFrame.LightDirection = Vector3.new(-1, -1, -1)
+	previewFrame.Parent = msOvSettings.Items["Content"].Instance
+
+	local previewCamera = Instance.new("Camera")
+	previewCamera.Parent = previewFrame
+	previewFrame.CurrentCamera = previewCamera
+
+	local previewPart = Instance.new("Part")
+	previewPart.Name = "PreviewMesh"
+	previewPart.Anchored = true
+	previewPart.CanCollide = false; previewPart.CanQuery = false; previewPart.CanTouch = false
+	previewPart.Size = Vector3.new(1, 1, 1)
+	previewPart.Transparency = 1
+	previewPart.CastShadow = false
+	previewPart.Parent = previewFrame
+
+	local previewMesh = Instance.new("SpecialMesh")
+	previewMesh.MeshType = Enum.MeshType.FileMesh
+	previewMesh.Parent = previewPart
+
+	local lastPreviewMesh = ""
+	local lastPreviewTex = ""
+	local previewSpin = 0
+
+	local rsPreview = RunService.RenderStepped:Connect(function(dt: number)
+		local want = idToAsset(msMeshId:Get()) or localMeshId or ""
+		if want ~= lastPreviewMesh then
+			lastPreviewMesh = want
+			previewMesh.MeshId = want
+			previewPart.Transparency = (want == "") and 1 or 0
+		end
+		local tex = idToAsset(msTexId:Get()) or ""
+		if tex ~= lastPreviewTex then
+			lastPreviewTex = tex
+			previewMesh.TextureId = tex
+		end
+
+		if previewPart.Transparency < 1 then
+			previewSpin = (previewSpin + dt * 0.6) % (2 * math.pi)
+			previewPart.CFrame = CFrame.Angles(0, previewSpin, 0)
+			-- GetExtentsSize() reflects the mesh's actual rendered bounds, not
+			-- just the Part's own Size, so this auto-frames regardless of how
+			-- big or small the asset's native scale is.
+			local extents = previewPart:GetExtentsSize()
+			local radius = math.max(extents.X, extents.Y, extents.Z, 0.1)
+			local dist = radius * 1.8 + 1
+			previewCamera.CFrame = CFrame.new(Vector3.new(0, radius * 0.3, dist), Vector3.new(0, 0, 0))
+		end
+	end)
+	table.insert(cleanups, function()
+		rsPreview:Disconnect()
+		previewFrame:Destroy()
+	end)
+
 	local modelOverlay: Model? = nil
 	local modelParts: { BasePart } = {}
 	local modelVisible = false
