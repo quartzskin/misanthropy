@@ -1071,7 +1071,13 @@ do
     end
 
     Library.Round = function(Self, Number, Float)
-        local Multiplier = 1 / (Float or 1)
+        -- Float is Slider.Decimals, and 0 (the default for any Slider that
+        -- doesn't pass Decimals explicitly - which is every slider in this
+        -- file) is truthy in Lua, so a bare `Float or 1` picks 0 instead of
+        -- 1: Multiplier = 1/0 = inf, and the result is inf/inf = NaN. Same
+        -- bug chudvision had in the same spot - treat 0 the same as
+        -- omitted/nil here too.
+        local Multiplier = 1 / ((Float and Float ~= 0) and Float or 1)
         return math.floor(Number * Multiplier) / Multiplier
     end
 
