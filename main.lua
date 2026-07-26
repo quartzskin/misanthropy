@@ -9690,17 +9690,15 @@ end
 ----------------------------------------------------------------------------------
 -- SECTION 5z3: Spotify
 ----------------------------------------------------------------------------------
--- Two hard limits worth knowing before touching this section:
--- 1. Roblox has no API to capture system/app audio, so the visualizer below
---    is NOT real FFT of what's actually playing - there is no way to get
---    that from inside this sandbox, period. It's a stylized animation
---    driven by is_playing plus, when available, the track's tempo/energy
---    from Spotify's audio-features endpoint (which Spotify has restricted
---    for a lot of newer developer apps - handled as an optional extra, not
---    a requirement) with a randomized-but-organic fallback otherwise.
--- 2. Lyrics come from a free public plain-text lookup (lyrics.ovh), not
---    Spotify - the public Web API has no lyrics endpoint at all. This is
---    full-text, not time-synced/karaoke-style.
+-- One hard limit worth knowing before touching this section: lyrics come
+-- from a free public plain-text lookup (lyrics.ovh), not Spotify - the
+-- public Web API has no lyrics endpoint at all. This is full-text, not
+-- time-synced/karaoke-style, and plenty of tracks just won't have an entry.
+-- (There used to be a cava-style bar visualizer here too, driven by
+-- is_playing plus optional /audio-features tempo/energy data - removed at
+-- the user's request. If it comes back, remember Roblox has no API to
+-- capture system/app audio, so it can never be real FFT of what's actually
+-- playing - only ever a stylized animation.)
 -- Auth is refresh-token based: this file can't do the initial OAuth login
 -- itself (no browser/redirect handling in a headless Lua script), so the
 -- user has to create a Spotify Developer app and do that one-time exchange
@@ -9708,7 +9706,15 @@ end
 -- Those three get saved to misanthropy_assets/spotify.json (separate from
 -- the CFG.* slot system - see "Configs" below - since Textbox values were
 -- never part of that to begin with) and auto-loaded on future runs.
+-- The whole section body is wrapped in a pcall: this is the newest, most
+-- network-dependent section in the file, and an uncaught error anywhere in
+-- it previously took out every section defined after it too (Configs, the
+-- splash screen) with zero visible indication why - the tab would just be
+-- blank. Now a failure here is contained, gets warn()'d (so it shows up in
+-- the Error Log above), and leaves a visible error panel on the page
+-- instead of nothing at all.
 do
+local spOk, spErr = pcall(function()
 	local SP_TOKEN_URL = "https://accounts.spotify.com/api/token"
 	local SP_API = "https://api.spotify.com/v1"
 
@@ -9720,7 +9726,7 @@ do
 	-- much later, by which point everything's been assigned).
 	local refreshSpotifyToken, ensureSpotifyToken, spotifyApi
 	local spPlay, spPause, spNext, spPrevious, spSetShuffle, spSetRepeat, spSetVolume
-	local pollSpotify, fetchAlbumArt, fetchLyrics, fetchAudioFeatures, onTrackChanged
+	local pollSpotify, fetchAlbumArt, fetchLyrics, onTrackChanged
 	-- forward-declared (not just deferred like the functions above) because
 	-- the Connect section's button needs to Set() it - it's assigned, not
 	-- re-declared, where the Overlay section actually creates the toggle.
@@ -9743,9 +9749,6 @@ do
 	local npShuffle = false
 	local npRepeat = "off"
 	local npArtUrl = ""
-	local npTempo = 120
-	local npEnergy = 0.6
-	local npHasAudioFeatures = false
 
 	local savedClientId, savedClientSecret, savedRefreshToken = "", "", ""
 	do
@@ -9793,7 +9796,6 @@ do
 	spEnabled = ovSec:Toggle({ Name = "Enabled", Default = false, Flag = "sp_ov_enabled" })
 	local spAccentColor = newColorpicker(ovSec, { Name = "Accent color", Default = Color3.fromRGB(30, 185, 84), Alpha = 1, Flag = "sp_accent" })
 	local ovSettings = settingsOf(ovSec, spEnabled)
-	local spShowViz = ovSettings:Toggle({ Name = "Show visualizer", Default = true, Flag = "sp_showviz" })
 	local spShowLyrics = ovSettings:Toggle({ Name = "Show lyrics", Default = false, Flag = "sp_showlyrics" })
 
 	local ctrlSec = newSection(pgSpotify, "Playback")
@@ -9925,32 +9927,6 @@ do
 		local idx = table.find(order, npRepeat) or 1
 		spSetRepeat(order[(idx % #order) + 1])
 	end)
-
-	local SP_BAR_COUNT = 24
-	local spVizRow = Instance.new("Frame")
-	spVizRow.BackgroundTransparency = 1
-	spVizRow.Size = UDim2.new(1, 0, 0, 36)
-	spVizRow.LayoutOrder = 5
-	spVizRow.Parent = spHolder
-	local spVizList = Instance.new("UIListLayout")
-	spVizList.FillDirection = Enum.FillDirection.Horizontal
-	spVizList.HorizontalAlignment = Enum.HorizontalAlignment.Center
-	spVizList.VerticalAlignment = Enum.VerticalAlignment.Bottom
-	spVizList.Padding = UDim.new(0, 2)
-	spVizList.Parent = spVizRow
-	local spBars: { Frame } = {}
-	local spBarPhase: { number } = {}
-	for i = 1, SP_BAR_COUNT do
-		local bar = Instance.new("Frame")
-		bar.BackgroundColor3 = Color3.fromRGB(30, 185, 84)
-		bar.BorderSizePixel = 0
-		bar.AnchorPoint = Vector2.new(0.5, 1)
-		bar.Size = UDim2.fromOffset(6, 4)
-		bar.LayoutOrder = i
-		bar.Parent = spVizRow
-		table.insert(spBars, bar)
-		spBarPhase[i] = (i * 2.399963) % (math.pi * 2)
-	end
 
 	local spLyricsFrame = Instance.new("ScrollingFrame")
 	spLyricsFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
@@ -10096,23 +10072,9 @@ do
 		end)
 	end
 
-	fetchAudioFeatures = function(trackId: string)
-		task.spawn(function()
-			local ok, _status, data = spotifyApi("GET", "/audio-features/" .. trackId)
-			if ok and data and type(data.tempo) == "number" and data.tempo > 0 then
-				npTempo = data.tempo
-				npEnergy = tonumber(data.energy) or 0.6
-				npHasAudioFeatures = true
-			else
-				npHasAudioFeatures = false
-			end
-		end)
-	end
-
 	onTrackChanged = function()
 		fetchAlbumArt(npArtUrl)
 		fetchLyrics(npArtist, npName)
-		if npTrackId then fetchAudioFeatures(npTrackId) end
 	end
 
 	pollSpotify = function()
@@ -10152,7 +10114,6 @@ do
 
 		local accent = spAccentColor:Get()
 		spProgFill.BackgroundColor3 = accent
-		for _, bar in ipairs(spBars) do bar.BackgroundColor3 = accent end
 
 		if spConnected then
 			spTitleLabel.Text = npName ~= "" and npName or "Not playing"
@@ -10176,25 +10137,6 @@ do
 		spPlayBtn.Text = npIsPlaying and "Pause" or "Play"
 		spShuffleBtn.BackgroundColor3 = npShuffle and accent or Color3.fromRGB(32, 32, 32)
 		spRepeatBtn.BackgroundColor3 = (npRepeat ~= "off") and accent or Color3.fromRGB(32, 32, 32)
-
-		spVizRow.Visible = spShowViz:Get()
-		if spShowViz:Get() then
-			local clock = os.clock()
-			local bpm = npHasAudioFeatures and npTempo or 120
-			local beatHz = bpm / 60
-			local energy = npHasAudioFeatures and npEnergy or 0.5
-			for i, bar in ipairs(spBars) do
-				local h
-				if npIsPlaying then
-					local wave = math.sin(clock * beatHz * math.pi * 2 + spBarPhase[i]) * 0.5 + 0.5
-					local jitter = math.sin(clock * (3 + i * 0.37) + spBarPhase[i] * 2) * 0.5 + 0.5
-					h = 4 + (wave * 0.6 + jitter * 0.4) * (18 + energy * 14)
-				else
-					h = 4 + math.sin(clock * 0.6 + spBarPhase[i]) * 1.5
-				end
-				bar.Size = UDim2.fromOffset(6, math.max(2, h))
-			end
-		end
 
 		spLyricsFrame.Visible = spShowLyrics:Get()
 	end)
@@ -10232,9 +10174,39 @@ do
 	end
 
 	CFG.toggles.sp_ov_enabled = spEnabled
-	CFG.toggles.sp_showviz = spShowViz; CFG.toggles.sp_showlyrics = spShowLyrics
+	CFG.toggles.sp_showlyrics = spShowLyrics
 	CFG.sliders.sp_volume_set = spVolSlider
 	CFG.colors.sp_accent = spAccentColor
+end)
+
+if not spOk then
+	warn("[misanthropy] Spotify section failed to load: " .. tostring(spErr))
+	local errSec = newSection(pgSpotify, "Spotify (failed to load)")
+	local errBox = Instance.new("ScrollingFrame")
+	errBox.BackgroundColor3 = Color3.fromRGB(40, 18, 18)
+	errBox.BorderSizePixel = 0
+	errBox.Size = UDim2.new(1, 0, 0, 100)
+	errBox.CanvasSize = UDim2.new(0, 0, 0, 0)
+	errBox.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	errBox.ScrollBarThickness = 4
+	errBox.Parent = errSec.Items["Content"].Instance
+	local errPad = Instance.new("UIPadding")
+	errPad.PaddingLeft = UDim.new(0, 6); errPad.PaddingRight = UDim.new(0, 6)
+	errPad.PaddingTop = UDim.new(0, 4); errPad.PaddingBottom = UDim.new(0, 4)
+	errPad.Parent = errBox
+	local errText = Instance.new("TextLabel")
+	errText.BackgroundTransparency = 1
+	errText.Size = UDim2.new(1, -4, 0, 0)
+	errText.AutomaticSize = Enum.AutomaticSize.Y
+	errText.Font = Enum.Font.Code
+	errText.TextSize = 12
+	errText.TextColor3 = Color3.fromRGB(255, 140, 140)
+	errText.TextWrapped = true
+	errText.TextXAlignment = Enum.TextXAlignment.Left
+	errText.TextYAlignment = Enum.TextYAlignment.Top
+	errText.Text = tostring(spErr)
+	errText.Parent = errBox
+end
 end
 
 ----------------------------------------------------------------------------------
