@@ -5028,6 +5028,7 @@ local pgCharacter = Window:Page({ Name = "Character FX", Columns = 2 })
 local pgWorld = Window:Page({ Name = "World FX", Columns = 2 })
 local pgPlayer = Window:Page({ Name = "Player", Columns = 2 })
 local pgConfigs = Window:Page({ Name = "Configs", Columns = 1 })
+local pgUtility = Window:Page({ Name = "Utility", Columns = 1 })
 
 local sectionSideCounts = {}
 local function newSection(page: any, name: string): any
@@ -5090,10 +5091,18 @@ local function settingsOf(section: any, toggle: any): any
 	return group
 end
 
--- chudvision has no toast/notification API (only a persistent Indicator
--- list, which doesn't fit one-off messages like "config saved"). notify()
--- is a no-op for now.
+-- chudvision has no toast/notification API, but nhack's own Library
+-- (getgenv().Library, untouched by the chudvision embed above - see the
+-- MisanthropyChudvision rename) does expose Library:Notify({Text, Lifetime}).
+-- Route through that when it's there; otherwise fall back to print so
+-- nothing throws.
 local function notify(title: string, text: string)
+	local NhackLibrary = getgenv().Library
+	if NhackLibrary and NhackLibrary.Notify then
+		pcall(function() NhackLibrary:Notify({ Text = title .. ": " .. text, Lifetime = 6 }) end)
+	else
+		print("[" .. title .. "] " .. text)
+	end
 end
 
 local cleanups: { () -> () } = {}
@@ -6569,6 +6578,64 @@ do
 		table.clear(savedMat); table.clear(savedColor); table.clear(savedTrans)
 	end
 
+	-- Some gear/backpack/attachment mesh parts in this game aren't parented
+	-- under the Character model at all - they're welded on (Weld/Motor6D/
+	-- WeldConstraint) from elsewhere in Workspace, so a plain
+	-- char:GetDescendants() BasePart scan misses them. This walks the
+	-- character, and for every joint it finds, follows Part0/Part1 to
+	-- whatever it's connected to (wherever that part actually lives) and
+	-- recurses into it too, so chained attachments (e.g. something welded
+	-- to a welded backpack) are covered.
+	local function collectAttachedParts(char: Model): { BasePart }
+		local seen: { [BasePart]: boolean } = {}
+		local result: { BasePart } = {}
+		local function visit(inst: Instance)
+			for _, d in ipairs(inst:GetDescendants()) do
+				if d:IsA("BasePart") then
+					if not seen[d] then
+						seen[d] = true
+						if d.Name ~= "HumanoidRootPart" then
+							table.insert(result, d)
+						end
+					end
+				elseif d:IsA("Weld") or d:IsA("Motor6D") or d:IsA("WeldConstraint") then
+					local joint = d :: Weld | Motor6D | WeldConstraint
+					local p0, p1 = (joint :: any).Part0, (joint :: any).Part1
+					for _, other in ipairs({ p0, p1 }) do
+						if other and other:IsA("BasePart") and not seen[other] then
+							seen[other] = true
+							if other.Name ~= "HumanoidRootPart" then
+								table.insert(result, other)
+							end
+							visit(other)
+						end
+					end
+				end
+			end
+		end
+		visit(char)
+		return result
+	end
+
+	local msAttachedParts: { BasePart } = {}
+	local msAttachedChar: Model? = nil
+	local msAttachedAcc = 0
+	local MS_ATTACHED_REFRESH = 0.5
+
+	local function refreshAttachedParts(char: Model, dt: number)
+		if char ~= msAttachedChar then
+			msAttachedChar = char
+			msAttachedParts = collectAttachedParts(char)
+			msAttachedAcc = 0
+			return
+		end
+		msAttachedAcc += dt
+		if msAttachedAcc >= MS_ATTACHED_REFRESH then
+			msAttachedAcc = 0
+			msAttachedParts = collectAttachedParts(char)
+		end
+	end
+
 	local msHideReal  = msSec:Toggle({ Name = "Hide my real body", Default = false, Flag = "ms_hidereal" })
 
 	local msOverlayOn = msSec:Toggle({ Name = "Mesh overlay", Default = false, Flag = "ms_overlay_on" })
@@ -6582,10 +6649,6 @@ do
 	local msPitch     = msOvSettings:Slider({ Name = "Pitch", Min = 0, Max = 360, Step = 5, Default = 0, Suffix = "°", Flag = "ms_pitch" })
 	local msYaw       = msOvSettings:Slider({ Name = "Yaw", Min = 0, Max = 360, Step = 5, Default = 0, Suffix = "°", Flag = "ms_yaw" })
 	local msRoll      = msOvSettings:Slider({ Name = "Roll", Min = 0, Max = 360, Step = 5, Default = 0, Suffix = "°", Flag = "ms_roll" })
-	local msSpinOn    = msOvSettings:Toggle({ Name = "Spin", Default = false, Flag = "ms_spin_on" })
-	local msSpinSettings = settingsOf(msSec, msSpinOn)
-	local msSpinAxis  = msSpinSettings:Dropdown({ Name = "Spin axis", Items = { "Yaw", "Pitch", "Roll" }, Default = "Yaw", Flag = "ms_spin_axis" })
-	local msSpinSpeed = msSpinSettings:Slider({ Name = "Spin speed", Min = 5, Max = 400, Step = 5, Default = 100, Suffix = "%", Flag = "ms_spin_speed" })
 	local msTexId     = newTextInput(msOvSettings, { Name = "Texture ID (optional)", Default = "", Placeholder = "rbxassetid or number", Flag = "ms_texid" })
 	local msModelId   = newTextInput(msOvSettings, { Name = "Model asset ID (Full Model mode)", Default = "", Placeholder = "rbxassetid or number, must be uploaded to Roblox", Flag = "ms_modelid" })
 
@@ -6716,9 +6779,22 @@ do
 	end
 	msOvSettings:Button({ Name = "Load model", Callback = loadModelOverlay })
 
-	local rs10 = RunService.RenderStepped:Connect(function()
+	-- Bound to RenderStepped via BindToRenderStep at a priority AFTER
+	-- Character (instead of a plain RunService.RenderStepped:Connect) so
+	-- this runs strictly after Roblox's own camera/character modules for
+	-- the frame. Those reset LocalTransparencyModifier on their own
+	-- (the built-in "fade character out when the camera gets close" system),
+	-- and a plain :Connect() has no guaranteed ordering against that - it
+	-- was losing the fight most frames, which is why "Hide my real body"
+	-- wasn't reliably hiding anything.
+	local MS_RENDER_NAME = "MisanthropyModelSkinRender"
+	RunService:BindToRenderStep(MS_RENDER_NAME, Enum.RenderPriority.Character.Value + 1, function(dt: number)
 		local char = getCharacter()
 		local root = char and (char:FindFirstChild("HumanoidRootPart") :: BasePart?)
+
+		if char then
+			refreshAttachedParts(char, dt)
+		end
 
 		if msMatEnabled:Get() and char then
 			local matName = msMaterial:Get()
@@ -6726,8 +6802,8 @@ do
 			local tintOn = msTint:Get()
 			local col = msMatColor:Get()
 			local bodyTrans = msBodyTrans:Get() / 100
-			for _, d in ipairs(char:GetDescendants()) do
-				if d:IsA("BasePart") and d.Name ~= "HumanoidRootPart" then
+			for _, d in ipairs(msAttachedParts) do
+				if d.Parent then
 					if savedMat[d] == nil then
 						savedMat[d] = d.Material
 						savedColor[d] = d.Color
@@ -6747,8 +6823,8 @@ do
 		end
 
 		if msHideReal:Get() and char then
-			for _, d in ipairs(char:GetDescendants()) do
-				if d:IsA("BasePart") and d.Name ~= "HumanoidRootPart" then
+			for _, d in ipairs(msAttachedParts) do
+				if d.Parent then
 					if savedTrans[d] == nil then savedTrans[d] = d.LocalTransparencyModifier end
 					d.LocalTransparencyModifier = 1
 				end
@@ -6772,17 +6848,9 @@ do
 			local pitch = math.rad(msPitch:Get())
 			local yaw = math.rad(msYaw:Get())
 			local roll = math.rad(msRoll:Get())
-			if msSpinOn:Get() then
-				local spin = (os.clock() * (msSpinSpeed:Get() / 100) * 2) % (2 * math.pi)
-				local axis = msSpinAxis:Get()
-				if axis == "Pitch" then
-					pitch += spin
-				elseif axis == "Roll" then
-					roll += spin
-				else
-					yaw += spin
-				end
-			end
+			-- rotation is always root.CFrame (your actual current orientation)
+			-- plus these fixed offsets - no independent animated spin added on
+			-- top, so the overlay only ever turns because you turned.
 			local targetCFrame = root.CFrame * CFrame.new(xoff, yoff, zoff) * CFrame.Angles(pitch, yaw, roll)
 
 			if useModel then
@@ -6809,19 +6877,16 @@ do
 		end
 	end)
 	table.insert(cleanups, function()
-		rs10:Disconnect()
+		RunService:UnbindFromRenderStep(MS_RENDER_NAME)
 		restoreMaterial()
 	end)
 
 	CFG.toggles.ms_mat_enabled = msMatEnabled; CFG.toggles.ms_tint = msTint
 	CFG.toggles.ms_overlay_on = msOverlayOn; CFG.toggles.ms_hidereal = msHideReal
-	CFG.toggles.ms_spin_on = msSpinOn
 	CFG.sliders.ms_bodytrans = msBodyTrans; CFG.sliders.ms_scale = msScale
 	CFG.sliders.ms_xoff = msXOff; CFG.sliders.ms_yoff = msYOff; CFG.sliders.ms_zoff = msZOff
 	CFG.sliders.ms_pitch = msPitch; CFG.sliders.ms_yaw = msYaw; CFG.sliders.ms_roll = msRoll
-	CFG.sliders.ms_spin_speed = msSpinSpeed
 	CFG.dropdowns.ms_material = msMaterial; CFG.dropdowns.ms_overlay_type = msOverlayType
-	CFG.dropdowns.ms_spin_axis = msSpinAxis
 	CFG.colors.ms_matcolor = msMatColor
 end
 
@@ -9360,6 +9425,312 @@ do
 	CFG.sliders.ap_orbitradius = apOrbitRadius; CFG.sliders.ap_orbitspeed = apOrbitSpeed
 	CFG.sliders.ap_pulseevery = apPulseEvery; CFG.sliders.ap_maxsize = apMaxSize
 	CFG.colors.ap_color1 = apColor1; CFG.colors.ap_color2 = apColor2
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5y: Vault Sorter
+----------------------------------------------------------------------------------
+do
+	local vsSec = newSection(pgUtility, "Vault Sorter")
+	local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+	local VS_TRASH_THRESHOLD = 1000
+	local VS_MOVE_DELAY = 0.05
+
+	local VS_CATEGORY_ORDER = {
+		"Keys", "Weapons", "Attachments", "Ammo", "Magazines", "Armor", "Clothing",
+		"Backpacks", "Fabrics", "Utility", "Medical", "Treasure", "Trash", "Rubles",
+	}
+
+	local function vsGetRank(cat: string): number
+		for i, v in ipairs(VS_CATEGORY_ORDER) do
+			if v == cat then return i end
+		end
+		return 999
+	end
+
+	local function vsGetItemProperties(itemName: string): { ItemType: string, SlotType: string, Cost: number }?
+		local itemsList = ReplicatedStorage:FindFirstChild("ItemsList")
+		if not itemsList then return nil end
+		local entry = itemsList:FindFirstChild(itemName)
+		if not entry then return nil end
+		local props = entry:FindFirstChild("ItemProperties")
+		if not props then return nil end
+		local itemType = props:GetAttribute("ItemType") or (props:FindFirstChild("ItemType") and props.ItemType.Value) or ""
+		local slotType = props:GetAttribute("SlotType") or (props:FindFirstChild("SlotType") and props.SlotType.Value) or ""
+		local cost = props:GetAttribute("Cost") or props:GetAttribute("Price") or (props:FindFirstChild("Cost") and props.Cost.Value) or (props:FindFirstChild("Price") and props.Price.Value)
+		cost = tonumber(cost) or 0
+		return { ItemType = itemType, SlotType = slotType, Cost = cost }
+	end
+
+	local function vsGetCategory(name: string, props: { ItemType: string, SlotType: string, Cost: number }?): string
+		if not props then return "Trash" end
+		local t, s, c = props.ItemType, props.SlotType, props.Cost
+		if t == "Material" and name == "Rubles" then return "Rubles"
+		elseif t == "Key" or t == "Keycard" then return "Keys"
+		elseif t == "Ammo" then return "Ammo"
+		elseif t == "Magazine" then return "Magazines"
+		elseif (t == "RangedWeapon" and s ~= "FlareGun") or t == "Grenade" then return "Weapons"
+		elseif t == "Handle" or t == "Stock" or t == "Front" or t == "Muzzle" or t == "Sight" or t == "Extra" then return "Attachments"
+		elseif (t == "Clothing" and (s == "ClothingChestRig" or s == "ClothingHeadware" or s == "ClothingLegArmor")) or t == "Visor" or t == "HelmetMask" then return "Armor"
+		elseif (t == "Clothing" and (s == "ClothingMask" or s == "ClothingShirt" or s == "ClothingPants" or s == "ClothingGloves")) or t == "Filter" then return "Clothing"
+		elseif t == "Clothing" and s == "ClothingBackpack" then return "Backpacks"
+		elseif t == "Barter" and string.find(name, "Fabric") then return "Fabrics"
+		elseif t == "Medical" then return "Medical"
+		elseif t == "Equipment" or t == "Buildable" or t == "RepairKit" then return "Utility"
+		else return (c > VS_TRASH_THRESHOLD) and "Treasure" or "Trash" end
+	end
+
+	local function vsGetMaxUISlot(): number
+		local maxSlot = 0
+		pcall(function()
+			local gui = LocalPlayer.PlayerGui:WaitForChild("MainGui")
+			local mainFrame = gui:WaitForChild("MainFrame")
+			local backpackFrame = mainFrame:WaitForChild("BackpackFrame")
+			local loot = backpackFrame:WaitForChild("Loot")
+			local inventoryFrame = loot:WaitForChild("Inventory")
+			local scrollingFrame = inventoryFrame:WaitForChild("ScrollingFrame")
+			local containerFrame = scrollingFrame:WaitForChild("Container")
+			local frame = containerFrame:WaitForChild("Frame")
+			for _, child in ipairs(frame:GetChildren()) do
+				if child.Name:match("Container%d+") and child.Visible then
+					local num = tonumber(child.Name:sub(10))
+					if num and num > maxSlot then maxSlot = num end
+				end
+			end
+		end)
+		return maxSlot
+	end
+
+	local function sortVault()
+		local vault = ReplicatedStorage:FindFirstChild("Players")
+			and ReplicatedStorage.Players:FindFirstChild(LocalPlayer.Name)
+			and ReplicatedStorage.Players[LocalPlayer.Name]:FindFirstChild("VaultStorage")
+		if not vault then notify("Vault Sorter", "No vault found."); return end
+
+		local inventory = vault:FindFirstChild("Inventory")
+		if not inventory then notify("Vault Sorter", "Vault has no inventory."); return end
+
+		local remote = ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("InventoryMove")
+		if not remote then notify("Vault Sorter", "InventoryMove remote not found."); return end
+
+		local maxSlot = vsGetMaxUISlot()
+		if maxSlot == 0 then notify("Vault Sorter", "Couldn't read vault UI (open your vault first)."); return end
+
+		local items = {}
+		local slotToItem = {}
+		local itemToSlot = {}
+
+		for _, obj in ipairs(inventory:GetChildren()) do
+			local slot = obj:GetAttribute("Slot")
+			if slot then
+				local num = tonumber(slot:match("Container(%d+)"))
+				if num and num <= maxSlot then
+					table.insert(items, obj)
+					slotToItem[slot] = obj
+					itemToSlot[obj] = slot
+				end
+			end
+		end
+
+		local enriched = {}
+		for _, obj in ipairs(items) do
+			local props = vsGetItemProperties(obj.Name)
+			local cat = vsGetCategory(obj.Name, props)
+			local cost = props and props.Cost or 0
+			local durability = obj:GetAttribute("Durability") or 0
+			local rawSkin = obj:GetAttribute("Skin") or ""
+			local skin = rawSkin
+			if skin == "" or skin == "None" or skin == "Default" or skin == "Normal" then
+				skin = ""
+			end
+			local loadedAmmo = obj:GetAttribute("LoadedAmmo") or 0
+			local amount = obj:GetAttribute("Amount") or 1
+			table.insert(enriched, {
+				obj = obj, name = obj.Name, slot = itemToSlot[obj], cost = cost, cat = cat,
+				durability = durability, skin = skin, loadedAmmo = loadedAmmo, amount = amount,
+			})
+		end
+
+		local nonRubles, rubles = {}, {}
+		for _, item in ipairs(enriched) do
+			if item.cat == "Rubles" then table.insert(rubles, item) else table.insert(nonRubles, item) end
+		end
+
+		table.sort(nonRubles, function(a, b)
+			if a.cat ~= b.cat then return vsGetRank(a.cat) < vsGetRank(b.cat) end
+			if a.cat == "Treasure" and a.cost ~= b.cost then return a.cost > b.cost end
+			local groupA, groupB = a.name .. "|" .. a.skin, b.name .. "|" .. b.skin
+			if groupA ~= groupB then return groupA < groupB end
+			if a.durability ~= b.durability then return a.durability > b.durability end
+			if a.loadedAmmo ~= b.loadedAmmo then return a.loadedAmmo > b.loadedAmmo end
+			if a.amount ~= b.amount then return a.amount > b.amount end
+			return false
+		end)
+
+		table.sort(rubles, function(a, b) return a.amount > b.amount end)
+
+		local finalOrder = {}
+		for _, item in ipairs(nonRubles) do finalOrder[#finalOrder + 1] = item.obj end
+		for _, item in ipairs(rubles) do finalOrder[#finalOrder + 1] = item.obj end
+
+		local targetSlotMap = {}
+		for i = 1, #nonRubles do targetSlotMap[nonRubles[i].obj] = "Container" .. i end
+		local rublesStart = maxSlot - #rubles + 1
+		for i = 1, #rubles do targetSlotMap[rubles[i].obj] = "Container" .. (rublesStart + i - 1) end
+
+		for _, obj in ipairs(finalOrder) do
+			local target = targetSlotMap[obj]
+			if not target then continue end
+			local currentSlot = itemToSlot[obj]
+			if currentSlot == target then continue end
+			local currentOccupant = slotToItem[target]
+			if currentOccupant == obj then continue end
+			if currentOccupant then
+				remote:FireServer(currentSlot, target, inventory, inventory, nil)
+				task.wait(VS_MOVE_DELAY)
+				slotToItem[target] = obj
+				slotToItem[currentSlot] = currentOccupant
+				itemToSlot[obj] = target
+				itemToSlot[currentOccupant] = currentSlot
+			else
+				remote:FireServer(currentSlot, target, inventory, inventory, nil)
+				task.wait(VS_MOVE_DELAY)
+				slotToItem[target] = obj
+				slotToItem[currentSlot] = nil
+				itemToSlot[obj] = target
+			end
+		end
+
+		notify("Vault Sorter", "Vault sorted.")
+	end
+
+	vsSec:Label("Sorts your own vault by category, cost, durability, skin and amount.")
+	vsSec:Button({ Name = "Sort Vault", Callback = function()
+		task.spawn(sortVault)
+	end })
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5z: Movement
+----------------------------------------------------------------------------------
+do
+	local msaSec = newSection(pgPlayer, "Movement")
+	local msaEnabled = msaSec:Toggle({
+		Name = "Max Slope Angle (stops getting stuck on debris/geometry)",
+		Default = false,
+		Flag = "msa_enabled",
+	})
+
+	local MSA_VALUE = 89
+	local msaChar: Model? = nil
+	local msaOriginal: number? = nil
+
+	local function applyMaxSlope()
+		local char = getCharacter()
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not char or not hum then return end
+
+		-- re-baseline on every respawn: a fresh Humanoid may not carry the
+		-- same MaxSlopeAngle the last one had, so always capture what this
+		-- specific character actually started at before we touch it.
+		if char ~= msaChar then
+			msaChar = char
+			msaOriginal = hum.MaxSlopeAngle
+		end
+
+		local target = msaEnabled:Get() and MSA_VALUE or (msaOriginal :: number)
+		if hum.MaxSlopeAngle ~= target then
+			hum.MaxSlopeAngle = target
+		end
+	end
+
+	local rsMsa = RunService.Heartbeat:Connect(applyMaxSlope)
+	table.insert(cleanups, function()
+		rsMsa:Disconnect()
+		local char = getCharacter()
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if hum and msaOriginal ~= nil then
+			hum.MaxSlopeAngle = msaOriginal
+		end
+	end)
+
+	CFG.toggles.msa_enabled = msaEnabled
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5z2: Position Visualizer
+----------------------------------------------------------------------------------
+do
+	local pvSec = newSection(pgUtility, "Position Visualizer")
+	local pvEnabled = pvSec:Toggle({ Name = "Enabled", Default = false, Flag = "pv_enabled" })
+	local pvSettings = settingsOf(pvSec, pvEnabled)
+	local pvShowText = pvSettings:Toggle({ Name = "Show coordinates", Default = true, Flag = "pv_showtext" })
+	local pvSize = pvSettings:Slider({ Name = "Marker size", Min = 20, Max = 200, Step = 5, Default = 60, Suffix = "%", Flag = "pv_size" })
+	local pvColor = newColorpicker(pvSettings, { Name = "Marker color", Default = Color3.fromRGB(80, 220, 120), Alpha = 1, Flag = "pv_color" })
+
+	local pvFolder = Instance.new("Folder")
+	pvFolder.Name = "MisanthropyPositionVisualizer"
+	pvFolder.Parent = Workspace
+	table.insert(cleanups, function() if pvFolder then pvFolder:Destroy() end end)
+
+	local pvMarker = Instance.new("Part")
+	pvMarker.Name = "PositionMarker"
+	pvMarker.Shape = Enum.PartType.Ball
+	pvMarker.Material = Enum.Material.Neon
+	pvMarker.Anchored = true
+	pvMarker.CanCollide = false; pvMarker.CanQuery = false; pvMarker.CanTouch = false; pvMarker.Massless = true
+	pvMarker.CastShadow = false
+	pvMarker.Size = Vector3.new(0.6, 0.6, 0.6)
+	pvMarker.Transparency = 1
+	pvMarker.Parent = pvFolder
+
+	local pvBillboard = Instance.new("BillboardGui")
+	pvBillboard.Name = "Coords"
+	pvBillboard.Size = UDim2.fromOffset(170, 36)
+	pvBillboard.StudsOffset = Vector3.new(0, 1.4, 0)
+	pvBillboard.AlwaysOnTop = true
+	pvBillboard.Enabled = false
+	pvBillboard.Parent = pvMarker
+
+	local pvText = Instance.new("TextLabel")
+	pvText.BackgroundTransparency = 1
+	pvText.Size = UDim2.fromScale(1, 1)
+	pvText.Font = Enum.Font.Code
+	pvText.TextSize = 14
+	pvText.TextColor3 = Color3.new(1, 1, 1)
+	pvText.TextStrokeTransparency = 0
+	pvText.Text = ""
+	pvText.Parent = pvBillboard
+
+	pvFolder.ChildRemoved:Connect(function()
+		task.defer(function()
+			if not pvMarker.Parent then pvMarker.Parent = pvFolder end
+		end)
+	end)
+
+	local rsPv = RunService.RenderStepped:Connect(function()
+		local root = getRootPart()
+		local on = pvEnabled:Get() and root ~= nil
+		pvMarker.Transparency = on and 0 or 1
+		pvBillboard.Enabled = on and pvShowText:Get()
+		if not on then return end
+
+		pvMarker.Color = pvColor:Get()
+		local s = pvSize:Get() / 100 * 0.6
+		pvMarker.Size = Vector3.new(s, s, s)
+		pvMarker.CFrame = CFrame.new(root.Position)
+
+		if pvShowText:Get() then
+			local p = root.Position
+			pvText.Text = string.format("X: %.1f  Y: %.1f  Z: %.1f", p.X, p.Y, p.Z)
+		end
+	end)
+	table.insert(cleanups, function() rsPv:Disconnect() end)
+
+	CFG.toggles.pv_enabled = pvEnabled; CFG.toggles.pv_showtext = pvShowText
+	CFG.sliders.pv_size = pvSize
+	CFG.colors.pv_color = pvColor
 end
 
 ----------------------------------------------------------------------------------
