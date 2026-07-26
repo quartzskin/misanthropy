@@ -9637,6 +9637,10 @@ do
 	local refreshSpotifyToken, ensureSpotifyToken, spotifyApi
 	local spPlay, spPause, spNext, spPrevious, spSetShuffle, spSetRepeat, spSetVolume
 	local pollSpotify, fetchAlbumArt, fetchLyrics, fetchAudioFeatures, onTrackChanged
+	-- forward-declared (not just deferred like the functions above) because
+	-- the Connect section's button needs to Set() it - it's assigned, not
+	-- re-declared, where the Overlay section actually creates the toggle.
+	local spEnabled: any = nil
 
 	-- Now-playing/auth state - declared before any UI so every closure in
 	-- this section (Playback buttons, the overlay's own buttons, the
@@ -9688,8 +9692,13 @@ do
 		spStatusLabel:SetText("Status: connecting...")
 		task.spawn(function()
 			if refreshSpotifyToken() then
-				spStatusLabel:SetText("Status: connected")
 				pcall(pollSpotify)
+				if npName ~= "" then
+					spStatusLabel:SetText("Status: connected - now playing " .. npName .. (npArtist ~= "" and (" by " .. npArtist) or ""))
+				else
+					spStatusLabel:SetText("Status: connected (nothing playing right now)")
+				end
+				spEnabled:Set(true)
 			else
 				spStatusLabel:SetText("Status: connect failed - check credentials")
 			end
@@ -9697,7 +9706,7 @@ do
 	end })
 
 	local ovSec = newSection(pgSpotify, "Overlay")
-	local spEnabled = ovSec:Toggle({ Name = "Show overlay", Default = false, Flag = "sp_ov_enabled" })
+	spEnabled = ovSec:Toggle({ Name = "Show overlay", Default = false, Flag = "sp_ov_enabled" })
 	local spAccentColor = newColorpicker(ovSec, { Name = "Accent color", Default = Color3.fromRGB(30, 185, 84), Alpha = 1, Flag = "sp_accent" })
 	local ovSettings = settingsOf(ovSec, spEnabled)
 	local spCorner = ovSettings:Dropdown({ Name = "Corner", Items = { "Top Left", "Top Right", "Bottom Left", "Bottom Right" }, Default = "Bottom Right", Flag = "sp_corner" })
@@ -10176,10 +10185,18 @@ do
 	end)
 
 	if savedClientId ~= "" and savedClientSecret ~= "" and savedRefreshToken ~= "" and _req then
+		spStatusLabel:SetText("Status: connecting (saved credentials)...")
 		task.spawn(function()
 			if refreshSpotifyToken() then
-				spStatusLabel:SetText("Status: connected")
 				pcall(pollSpotify)
+				if npName ~= "" then
+					spStatusLabel:SetText("Status: connected - now playing " .. npName .. (npArtist ~= "" and (" by " .. npArtist) or ""))
+				else
+					spStatusLabel:SetText("Status: connected (nothing playing right now)")
+				end
+				spEnabled:Set(true)
+			else
+				spStatusLabel:SetText("Status: saved credentials found but connect failed")
 			end
 		end)
 	end
