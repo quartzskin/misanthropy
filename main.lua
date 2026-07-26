@@ -9789,16 +9789,12 @@ do
 		end)
 	end })
 
-	local ovSec = newSection(pgSpotify, "Overlay")
-	spEnabled = ovSec:Toggle({ Name = "Show overlay", Default = false, Flag = "sp_ov_enabled" })
+	local ovSec = newSection(pgSpotify, "Now Playing")
+	spEnabled = ovSec:Toggle({ Name = "Enabled", Default = false, Flag = "sp_ov_enabled" })
 	local spAccentColor = newColorpicker(ovSec, { Name = "Accent color", Default = Color3.fromRGB(30, 185, 84), Alpha = 1, Flag = "sp_accent" })
 	local ovSettings = settingsOf(ovSec, spEnabled)
-	local spCorner = ovSettings:Dropdown({ Name = "Corner", Items = { "Top Left", "Top Right", "Bottom Left", "Bottom Right" }, Default = "Bottom Right", Flag = "sp_corner" })
-	local spWidth = ovSettings:Slider({ Name = "Width", Min = 220, Max = 480, Step = 10, Default = 300, Suffix = "px", Flag = "sp_width" })
-	local spDrag = ovSettings:Toggle({ Name = "Draggable", Default = false, Flag = "sp_drag" })
 	local spShowViz = ovSettings:Toggle({ Name = "Show visualizer", Default = true, Flag = "sp_showviz" })
 	local spShowLyrics = ovSettings:Toggle({ Name = "Show lyrics", Default = false, Flag = "sp_showlyrics" })
-	local spOpacity = ovSettings:Slider({ Name = "Opacity", Min = 20, Max = 100, Step = 5, Default = 92, Suffix = "%", Flag = "sp_opacity" })
 
 	local ctrlSec = newSection(pgSpotify, "Playback")
 	ctrlSec:Button({ Name = "Previous", Callback = function() spPrevious() end })
@@ -9813,25 +9809,20 @@ do
 	local spVolSlider = ctrlSec:Slider({ Name = "Volume", Min = 0, Max = 100, Step = 5, Default = 50, Suffix = "%", Flag = "sp_volume_set",
 		Callback = function(v) spSetVolume(v) end })
 
-	-- Boxy, chudvision-styled persistent overlay - own ScreenGui-parented
-	-- Frame (not part of the chudvision Window), same dark/outline palette
-	-- (#4B4B4B outline, #161616/#202020 fill) as the rest of the UI.
+	-- Native chudvision content (per the user's request), not a separate
+	-- floating overlay: dropped straight into the "Now Playing" section's
+	-- own Content frame, same technique as the Error Log panel
+	-- (Section.Items["Content"].Instance is the real Frame every native
+	-- widget parents into). No background/stroke of its own - it already
+	-- sits inside the section's bordered, filled card, so a second border
+	-- around the widget itself would just double up.
 	local spHolder = Instance.new("Frame")
-	spHolder.Name = "SpotifyOverlay"
-	spHolder.BackgroundColor3 = Color3.fromRGB(22, 22, 22)
-	spHolder.BorderSizePixel = 0
+	spHolder.Name = "SpotifyNowPlaying"
+	spHolder.BackgroundTransparency = 1
 	spHolder.AutomaticSize = Enum.AutomaticSize.Y
-	spHolder.Size = UDim2.fromOffset(300, 0)
+	spHolder.Size = UDim2.new(1, 0, 0, 0)
 	spHolder.Visible = false
-	spHolder.Parent = screen
-	local spStroke = Instance.new("UIStroke")
-	spStroke.Color = Color3.fromRGB(75, 75, 75)
-	spStroke.Thickness = 1
-	spStroke.Parent = spHolder
-	local spPad = Instance.new("UIPadding")
-	spPad.PaddingTop = UDim.new(0, 8); spPad.PaddingBottom = UDim.new(0, 8)
-	spPad.PaddingLeft = UDim.new(0, 8); spPad.PaddingRight = UDim.new(0, 8)
-	spPad.Parent = spHolder
+	spHolder.Parent = ovSec.Items["Content"].Instance
 	local spList = Instance.new("UIListLayout")
 	spList.Padding = UDim.new(0, 6)
 	spList.SortOrder = Enum.SortOrder.LayoutOrder
@@ -9983,39 +9974,6 @@ do
 	spLyricsText.TextYAlignment = Enum.TextYAlignment.Top
 	spLyricsText.Text = ""
 	spLyricsText.Parent = spLyricsFrame
-
-	local SP_CORNER_ANCHOR = {
-		["Top Left"] = { anchor = Vector2.new(0, 0), pos = function() return UDim2.fromOffset(16, 16) end },
-		["Top Right"] = { anchor = Vector2.new(1, 0), pos = function() local vp = Workspace.CurrentCamera.ViewportSize; return UDim2.fromOffset(vp.X - 16, 16) end },
-		["Bottom Left"] = { anchor = Vector2.new(0, 1), pos = function() local vp = Workspace.CurrentCamera.ViewportSize; return UDim2.fromOffset(16, vp.Y - 16) end },
-		["Bottom Right"] = { anchor = Vector2.new(1, 1), pos = function() local vp = Workspace.CurrentCamera.ViewportSize; return UDim2.fromOffset(vp.X - 16, vp.Y - 16) end },
-	}
-	local spPosX, spPosY = 120, 120
-	do
-		local s = loadString("spotify_pos.txt")
-		if s then local x, y = string.match(s, "^(-?%d+),(-?%d+)$"); if x then spPosX = tonumber(x) :: number; spPosY = tonumber(y) :: number end end
-	end
-	do
-		local dragging, sx, sy, ox, oy = false, 0, 0, 0, 0
-		local c1 = spHolder.InputBegan:Connect(function(input)
-			if not spDrag:Get() then return end
-			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-				dragging = true; sx = input.Position.X; sy = input.Position.Y; ox = spPosX; oy = spPosY
-			end
-		end)
-		local c2 = UserInputService.InputChanged:Connect(function(input)
-			if not dragging then return end
-			if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-				spPosX = ox + (input.Position.X - sx); spPosY = oy + (input.Position.Y - sy)
-			end
-		end)
-		local c3 = UserInputService.InputEnded:Connect(function(input)
-			if dragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
-				dragging = false; saveString("spotify_pos.txt", string.format("%d,%d", spPosX, spPosY))
-			end
-		end)
-		table.insert(cleanups, function() c1:Disconnect(); c2:Disconnect(); c3:Disconnect() end)
-	end
 
 	-- ---- network layer (actual function bodies for the forward decls) ----
 
@@ -10192,18 +10150,6 @@ do
 		spHolder.Visible = on
 		if not on then return end
 
-		spHolder.BackgroundTransparency = 1 - (spOpacity:Get() / 100)
-		spHolder.Size = UDim2.fromOffset(spWidth:Get(), 0)
-
-		if spDrag:Get() then
-			spHolder.AnchorPoint = Vector2.zero
-			spHolder.Position = UDim2.fromOffset(spPosX, spPosY)
-		else
-			local corner = SP_CORNER_ANCHOR[spCorner:Get()] or SP_CORNER_ANCHOR["Bottom Right"]
-			spHolder.AnchorPoint = corner.anchor
-			spHolder.Position = corner.pos()
-		end
-
 		local accent = spAccentColor:Get()
 		spProgFill.BackgroundColor3 = accent
 		for _, bar in ipairs(spBars) do bar.BackgroundColor3 = accent end
@@ -10285,10 +10231,9 @@ do
 		end)
 	end
 
-	CFG.toggles.sp_ov_enabled = spEnabled; CFG.toggles.sp_drag = spDrag
+	CFG.toggles.sp_ov_enabled = spEnabled
 	CFG.toggles.sp_showviz = spShowViz; CFG.toggles.sp_showlyrics = spShowLyrics
-	CFG.sliders.sp_width = spWidth; CFG.sliders.sp_opacity = spOpacity; CFG.sliders.sp_volume_set = spVolSlider
-	CFG.dropdowns.sp_corner = spCorner
+	CFG.sliders.sp_volume_set = spVolSlider
 	CFG.colors.sp_accent = spAccentColor
 end
 
