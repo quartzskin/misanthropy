@@ -10740,11 +10740,41 @@ do
 	local fsLight   = fsSettings:Toggle({ Name = "Glow light (matches color)", Default = false, Flag = "fs_light" })
 	local fsRainbow = fsSettings:Toggle({ Name = "Rainbow", Default = false, Flag = "fs_rainbow" })
 	local fsRbSpeed = fsSettings:Slider({ Name = "Rainbow speed", Min = 5, Max = 200, Step = 5, Default = 50, Suffix = "%", Flag = "fs_rbspeed" })
+	local fsShockwave = fsSettings:Toggle({ Name = "Shockwave", Default = false, Flag = "fs_shockwave" })
+	local fsShockSize = fsSettings:Slider({ Name = "Shockwave size", Min = 5, Max = 60, Step = 5, Default = 20, Flag = "fs_shocksize" })
 
 	local fsFolder = Instance.new("Folder")
 	fsFolder.Name = "MisanthropyFootsteps"
 	fsFolder.Parent = Workspace
 	table.insert(cleanups, function() if fsFolder then fsFolder:Destroy() end end)
+
+	-- A small expanding+fading ring at each step, distinct from Landing/
+	-- Aura Pulse shockwaves - this one fires per footstep, not on landing.
+	-- Flat, thin Cylinder rotated 90 about Z (its native circular face is on
+	-- the X axis, so this points that face straight up/down) tweened wider
+	-- and more transparent, same "expanding disc" technique as the rest of
+	-- this file's shockwave-style effects.
+	local FsTweenService = game:GetService("TweenService")
+	local function spawnFootShockwave(pos: Vector3, col: Color3)
+		local ring = Instance.new("Part")
+		ring.Name = "FootShockwave"
+		ring.Shape = Enum.PartType.Cylinder
+		ring.Material = Enum.Material.Neon
+		ring.Color = col
+		ring.Size = Vector3.new(0.05, 0.4, 0.4)
+		ring.CFrame = CFrame.new(pos) * CFrame.Angles(0, 0, math.rad(90))
+		ring.Transparency = 0.2
+		ring.Anchored = true
+		ring.CanCollide = false; ring.CanQuery = false; ring.CanTouch = false; ring.CastShadow = false
+		ring.Parent = fsFolder
+		local maxSize = fsShockSize:Get() / 10
+		local tween = FsTweenService:Create(ring, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+			Size = Vector3.new(0.05, maxSize, maxSize),
+			Transparency = 1,
+		})
+		tween:Play()
+		tween.Completed:Connect(function() ring:Destroy() end)
+	end
 
 	local function loopSegs(points: { { number } }): { { number } }
 		local segs = {}
@@ -10992,16 +11022,19 @@ do
 				end
 
 				spawnStep(base, col, fsSize:Get() / 100, fsShape:Get(), fsWalls:Get(), fsLight:Get())
+				if fsShockwave:Get() then
+					spawnFootShockwave(stepPos, col)
+				end
 			end
 		end
 	end)
 	table.insert(cleanups, function() rs5:Disconnect() end)
 
 	CFG.toggles.fs_enabled = fsEnabled; CFG.toggles.fs_rainbow = fsRainbow; CFG.toggles.fs_walls = fsWalls
-	CFG.toggles.fs_light = fsLight
+	CFG.toggles.fs_light = fsLight; CFG.toggles.fs_shockwave = fsShockwave
 	CFG.sliders.fs_size = fsSize; CFG.sliders.fs_fade = fsFade
 	CFG.sliders.fs_spacing = fsSpacing; CFG.sliders.fs_width = fsWidth
-	CFG.sliders.fs_rbspeed = fsRbSpeed
+	CFG.sliders.fs_rbspeed = fsRbSpeed; CFG.sliders.fs_shocksize = fsShockSize
 	CFG.dropdowns.fs_shape = fsShape
 	CFG.colors.fs_color = fsColor
 end
@@ -11085,6 +11118,77 @@ do
 	local emSpeed    = emSettings:Slider({ Name = "Speed", Min = 10, Max = 300, Step = 5, Default = 100, Suffix = "%", Flag = "em_speed" })
 	local emPriority = emSettings:Dropdown({ Name = "Priority", Items = PRIORITIES, Default = "Action (full body)", Flag = "em_priority" })
 
+	local EMOTE_BURST_STYLES = { "Confetti", "Petals", "Sparkles" }
+	local emBurstOn = emSec:Toggle({ Name = "Burst on play", Default = false, Flag = "em_burst_on" })
+	local emBurstColor = newColorpicker(emSec, { Name = "Burst color", Default = Color3.fromRGB(255, 200, 80), Alpha = 1, Flag = "em_burst_color" })
+	local emBurstSettings = settingsOf(emSec, emBurstOn)
+	local emBurstStyle  = emBurstSettings:Dropdown({ Name = "Burst style", Items = EMOTE_BURST_STYLES, Default = "Confetti", Flag = "em_burst_style" })
+	local emBurstAmount = emBurstSettings:Slider({ Name = "Burst amount", Min = 10, Max = 100, Step = 5, Default = 40, Flag = "em_burst_amount" })
+
+	local emBurstFolder = Instance.new("Folder")
+	emBurstFolder.Name = "MisanthropyEmoteBurst"
+	emBurstFolder.Parent = Workspace
+	table.insert(cleanups, function() if emBurstFolder then emBurstFolder:Destroy() end end)
+
+	-- One-shot ParticleEmitter:Emit(n) burst, fired once per emote start.
+	-- All three styles reuse the same confirmed-safe sparkle texture already
+	-- used elsewhere in this file (Fireflies/Aura Pulse) rather than
+	-- guessing at new asset IDs for "confetti"/"petals" - the styles are
+	-- differentiated purely through color/speed/spread/gravity instead.
+	local function spawnEmoteBurst(root: BasePart)
+		local anchor = Instance.new("Part")
+		anchor.Name = "EmoteBurstAnchor"
+		anchor.Anchored = true
+		anchor.CanCollide = false; anchor.CanQuery = false; anchor.CanTouch = false; anchor.CastShadow = false
+		anchor.Transparency = 1
+		anchor.Size = Vector3.new(0.1, 0.1, 0.1)
+		anchor.CFrame = root.CFrame * CFrame.new(0, 2, 0)
+		anchor.Parent = emBurstFolder
+
+		local emitter = Instance.new("ParticleEmitter")
+		emitter.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+		emitter.Enabled = false
+		emitter.LightInfluence = 0
+
+		local style = emBurstStyle:Get()
+		local col = emBurstColor:Get()
+		if style == "Confetti" then
+			emitter.Color = ColorSequence.new({
+				ColorSequenceKeypoint.new(0, Color3.fromHSV(math.random(), 0.85, 1)),
+				ColorSequenceKeypoint.new(0.5, Color3.fromHSV(math.random(), 0.85, 1)),
+				ColorSequenceKeypoint.new(1, Color3.fromHSV(math.random(), 0.85, 1)),
+			})
+			emitter.Size = NumberSequence.new(0.15, 0.05)
+			emitter.Lifetime = NumberRange.new(0.8, 1.4)
+			emitter.Speed = NumberRange.new(8, 16)
+			emitter.SpreadAngle = Vector2.new(180, 180)
+			emitter.RotSpeed = NumberRange.new(-360, 360)
+			emitter.Acceleration = Vector3.new(0, -20, 0)
+			emitter.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1) })
+		elseif style == "Petals" then
+			emitter.Color = ColorSequence.new(col)
+			emitter.Size = NumberSequence.new(0.25, 0.1)
+			emitter.Lifetime = NumberRange.new(1.2, 2)
+			emitter.Speed = NumberRange.new(3, 7)
+			emitter.SpreadAngle = Vector2.new(120, 120)
+			emitter.RotSpeed = NumberRange.new(-90, 90)
+			emitter.Acceleration = Vector3.new(0, -4, 0)
+			emitter.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.1), NumberSequenceKeypoint.new(1, 1) })
+		else -- Sparkles
+			emitter.Color = ColorSequence.new(col)
+			emitter.Size = NumberSequence.new(0.12, 0)
+			emitter.Lifetime = NumberRange.new(0.4, 0.8)
+			emitter.Speed = NumberRange.new(10, 20)
+			emitter.SpreadAngle = Vector2.new(180, 180)
+			emitter.Acceleration = Vector3.new(0, 6, 0)
+			emitter.LightEmission = 1
+			emitter.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1) })
+		end
+		emitter.Parent = anchor
+		emitter:Emit(math.floor(emBurstAmount:Get()))
+		task.delay(2.5, function() if anchor.Parent then anchor:Destroy() end end)
+	end
+
 	local currentTrack: AnimationTrack? = nil
 	local animInstance: Animation? = nil
 
@@ -11160,6 +11264,11 @@ do
 		track:Play(0.15)
 		track:AdjustSpeed(emSpeed:Get() / 100)
 
+		if emBurstOn:Get() then
+			local burstRoot = getRootPart()
+			if burstRoot then spawnEmoteBurst(burstRoot) end
+		end
+
 		local name = labelForId(id)
 		updateNowPlaying(name, id)
 		notify("Emotes", "Playing " .. id)
@@ -11227,9 +11336,10 @@ do
 		stopEmote()
 	end)
 
-	CFG.toggles.em_loop = emLoop
-	CFG.sliders.em_speed = emSpeed
-	CFG.dropdowns.em_priority = emPriority
+	CFG.toggles.em_loop = emLoop; CFG.toggles.em_burst_on = emBurstOn
+	CFG.sliders.em_speed = emSpeed; CFG.sliders.em_burst_amount = emBurstAmount
+	CFG.dropdowns.em_priority = emPriority; CFG.dropdowns.em_burst_style = emBurstStyle
+	CFG.colors.em_burst_color = emBurstColor
 end
 
 ----------------------------------------------------------------------------------
@@ -11658,58 +11768,58 @@ do
 	-- character-following cosmetic in this file - CFrame-matched to the
 	-- real HumanoidRootPart each frame, "server sided position" here just
 	-- means "my own real position," same as Model Skin's overlay rotation.
-	local ffSec = newSection(pgCharacter, "Forcefield")
-	local ffEnabled = ffSec:Toggle({ Name = "Enabled", Default = false, Flag = "ff_enabled" })
-	local ffColor = newColorpicker(ffSec, { Name = "Color", Default = Color3.fromRGB(90, 170, 255), Alpha = 1, Flag = "ff_color" })
-	local ffSettings = settingsOf(ffSec, ffEnabled)
-	local ffSize    = ffSettings:Slider({ Name = "Size", Min = 10, Max = 300, Step = 5, Default = 100, Suffix = "%", Flag = "ff_size" })
-	local ffTrans   = ffSettings:Slider({ Name = "Transparency", Min = 0, Max = 90, Step = 5, Default = 40, Suffix = "%", Flag = "ff_trans" })
-	local ffRainbow = ffSettings:Toggle({ Name = "Rainbow", Default = false, Flag = "ff_rainbow" })
+	local fcSec = newSection(pgCharacter, "Forcefield")
+	local fcEnabled = fcSec:Toggle({ Name = "Enabled", Default = false, Flag = "fc_enabled" })
+	local fcColor = newColorpicker(fcSec, { Name = "Color", Default = Color3.fromRGB(90, 170, 255), Alpha = 1, Flag = "fc_color" })
+	local fcSettings = settingsOf(fcSec, fcEnabled)
+	local fcSize    = fcSettings:Slider({ Name = "Size", Min = 10, Max = 300, Step = 5, Default = 100, Suffix = "%", Flag = "fc_size" })
+	local fcTrans   = fcSettings:Slider({ Name = "Transparency", Min = 0, Max = 90, Step = 5, Default = 40, Suffix = "%", Flag = "fc_trans" })
+	local fcRainbow = fcSettings:Toggle({ Name = "Rainbow", Default = false, Flag = "fc_rainbow" })
 
-	local ffFolder = Instance.new("Folder")
-	ffFolder.Name = "MisanthropyForcefield"
-	ffFolder.Parent = Workspace
-	table.insert(cleanups, function() if ffFolder then ffFolder:Destroy() end end)
+	local fcFolder = Instance.new("Folder")
+	fcFolder.Name = "MisanthropyForcefield"
+	fcFolder.Parent = Workspace
+	table.insert(cleanups, function() if fcFolder then fcFolder:Destroy() end end)
 
-	local ffBall = Instance.new("Part")
-	ffBall.Name = "Forcefield"
-	ffBall.Shape = Enum.PartType.Ball
-	ffBall.Material = Enum.Material.ForceField
-	ffBall.Anchored = true
-	ffBall.CanCollide = false; ffBall.CanQuery = false; ffBall.CanTouch = false; ffBall.Massless = true
-	ffBall.CastShadow = false
-	ffBall.Transparency = 1
-	ffBall.Parent = ffFolder
+	local fcBall = Instance.new("Part")
+	fcBall.Name = "Forcefield"
+	fcBall.Shape = Enum.PartType.Ball
+	fcBall.Material = Enum.Material.ForceField
+	fcBall.Anchored = true
+	fcBall.CanCollide = false; fcBall.CanQuery = false; fcBall.CanTouch = false; fcBall.Massless = true
+	fcBall.CastShadow = false
+	fcBall.Transparency = 1
+	fcBall.Parent = fcFolder
 
-	local lastFfSig = ""
-	local rsFf = RunService.Heartbeat:Connect(function()
+	local lastFcSig = ""
+	local rsFc = RunService.Heartbeat:Connect(function()
 		local root = getRootPart()
-		if not ffEnabled:Get() or not root then
-			if ffBall.Transparency ~= 1 then ffBall.Transparency = 1 end
+		if not fcEnabled:Get() or not root then
+			if fcBall.Transparency ~= 1 then fcBall.Transparency = 1 end
 			return
 		end
 
-		local sz = (ffSize:Get() / 100) * 6
-		local trans = ffTrans:Get() / 100
-		local col = ffRainbow:Get() and Color3.fromHSV((os.clock() * 0.15) % 1, 0.85, 1) or ffColor:Get()
+		local sz = (fcSize:Get() / 100) * 6
+		local trans = fcTrans:Get() / 100
+		local col = fcRainbow:Get() and Color3.fromHSV((os.clock() * 0.15) % 1, 0.85, 1) or fcColor:Get()
 
 		local sig = string.format("%.2f|%.2f|%s", sz, trans, col:ToHex())
-		if sig ~= lastFfSig then
-			lastFfSig = sig
-			ffBall.Size = Vector3.new(sz, sz, sz)
-			ffBall.Color = col
-			ffBall.Transparency = trans
+		if sig ~= lastFcSig then
+			lastFcSig = sig
+			fcBall.Size = Vector3.new(sz, sz, sz)
+			fcBall.Color = col
+			fcBall.Transparency = trans
 		end
 
-		ffBall.CFrame = root.CFrame
+		fcBall.CFrame = root.CFrame
 	end)
 	table.insert(cleanups, function()
-		rsFf:Disconnect()
+		rsFc:Disconnect()
 	end)
 
-	CFG.toggles.ff_enabled = ffEnabled; CFG.toggles.ff_rainbow = ffRainbow
-	CFG.sliders.ff_size = ffSize; CFG.sliders.ff_trans = ffTrans
-	CFG.colors.ff_color = ffColor
+	CFG.toggles.fc_enabled = fcEnabled; CFG.toggles.fc_rainbow = fcRainbow
+	CFG.sliders.fc_size = fcSize; CFG.sliders.fc_trans = fcTrans
+	CFG.colors.fc_color = fcColor
 end
 
 ----------------------------------------------------------------------------------
@@ -12926,7 +13036,7 @@ do
 end
 
 ----------------------------------------------------------------------------------
--- SECTION 5s: Leaves Fall / Cherry Blossoms
+-- SECTION 5s: Leaves Fall / Cherry Blossoms / Falling Feathers
 ----------------------------------------------------------------------------------
 -- shared helper: leaves and blossoms use identical fall/wind/fade logic, just different visuals
 do
@@ -13094,6 +13204,11 @@ do
 		Color3.fromRGB(255, 200, 220), Color3.fromRGB(255, 180, 210), Color3.fromRGB(255, 220, 235),
 		Color3.fromRGB(255, 160, 190), Color3.fromRGB(255, 210, 225), Color3.fromRGB(250, 190, 215),
 	}, { prefix = "cb", maxCount = 85, fallSpeed = 18, radius = 50, windX = 20, windZ = 15, lifetime = 16 })
+
+	buildFallingDebris("Falling Feathers", "MisanthropyFeathers", "Feather", Vector3.new(1, 0.1, 2), {
+		Color3.fromRGB(255, 255, 255), Color3.fromRGB(235, 235, 240), Color3.fromRGB(220, 225, 235),
+		Color3.fromRGB(245, 245, 250),
+	}, { prefix = "fh", maxCount = 70, fallSpeed = 22, radius = 50, windX = 18, windZ = 12, lifetime = 15 })
 end
 
 ----------------------------------------------------------------------------------
@@ -14129,6 +14244,500 @@ do
 end
 
 ----------------------------------------------------------------------------------
+-- SECTION 5w2: Aurora
+----------------------------------------------------------------------------------
+do
+	local auSec = newSection(pgWorld, "Aurora")
+	local auEnabled = auSec:Toggle({ Name = "Enabled", Default = false, Flag = "au_enabled" })
+	local auColor1 = newColorpicker(auSec, { Name = "Color 1", Default = Color3.fromRGB(60, 220, 140), Alpha = 1, Flag = "au_color1" })
+	local auColor2 = newColorpicker(auSec, { Name = "Color 2", Default = Color3.fromRGB(120, 90, 255), Alpha = 1, Flag = "au_color2" })
+	local auSettings = settingsOf(auSec, auEnabled)
+	local auHeight = auSettings:Slider({ Name = "Height", Min = 60, Max = 300, Step = 10, Default = 140, Flag = "au_height" })
+	local auSpeed  = auSettings:Slider({ Name = "Flow speed", Min = 5, Max = 100, Step = 5, Default = 30, Suffix = "%", Flag = "au_speed" })
+	local auBands  = auSettings:Slider({ Name = "Band count", Min = 2, Max = 8, Step = 1, Default = 5, Flag = "au_bands" })
+
+	local auFolder = Instance.new("Folder")
+	auFolder.Name = "MisanthropyAurora"
+	auFolder.Parent = Workspace
+	table.insert(cleanups, function() if auFolder then auFolder:Destroy() end end)
+
+	type Band = { inst: BasePart, phase: number, seed: number }
+	local bands: { Band } = {}
+
+	local function destroyBands()
+		for _, b in ipairs(bands) do b.inst:Destroy() end
+		table.clear(bands)
+	end
+
+	local function buildBands(n: number)
+		destroyBands()
+		for i = 1, n do
+			local p = Instance.new("Part")
+			p.Name = "AuroraBand"
+			p.Size = Vector3.new(260, 0.4, 26 + math.random(0, 20))
+			p.Material = Enum.Material.Neon
+			p.Anchored = true
+			p.CanCollide = false; p.CanQuery = false; p.CanTouch = false; p.CastShadow = false
+			p.Transparency = 0.55
+			p.Parent = auFolder
+			table.insert(bands, { inst = p, phase = (i / n) * math.pi * 2, seed = math.random() * 1000 })
+		end
+	end
+
+	local lastBandCount = 0
+	local rsAu = RunService.Heartbeat:Connect(function(dt: number)
+		if not auEnabled:Get() then
+			if #bands > 0 then destroyBands() end
+			return
+		end
+		local root = getRootPart()
+		if not root then return end
+		local n = math.floor(auBands:Get())
+		if n ~= lastBandCount or #bands == 0 then
+			lastBandCount = n
+			buildBands(n)
+		end
+		local t = os.clock() * (auSpeed:Get() / 100)
+		local baseHeight = auHeight:Get()
+		local c1, c2 = auColor1:Get(), auColor2:Get()
+		for i, b in ipairs(bands) do
+			local wave = math.sin(t * 0.3 + b.phase)
+			local bob = math.sin(t * 0.5 + b.seed) * 6
+			local blend = (math.sin(t * 0.25 + b.phase) + 1) / 2
+			b.inst.Color = c1:Lerp(c2, blend)
+			b.inst.CFrame = CFrame.new(root.Position + Vector3.new(0, baseHeight + bob + i * 4, 0))
+				* CFrame.Angles(0, t * 0.05 + b.phase, math.rad(wave * 4))
+			b.inst.Transparency = 0.45 + math.sin(t * 0.4 + b.seed) * 0.15
+		end
+	end)
+	table.insert(cleanups, function()
+		rsAu:Disconnect()
+		destroyBands()
+	end)
+
+	CFG.toggles.au_enabled = auEnabled
+	CFG.sliders.au_height = auHeight; CFG.sliders.au_speed = auSpeed; CFG.sliders.au_bands = auBands
+	CFG.colors.au_color1 = auColor1; CFG.colors.au_color2 = auColor2
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5w3: Ground Mist
+----------------------------------------------------------------------------------
+do
+	-- Distinct from Atmospheric Fog above (a global Lighting.FogEnd-style
+	-- toggle): this is a localized, visible layer of flat spinning discs
+	-- that follow you and hug the ground, not a scene-wide render setting.
+	local gmSec = newSection(pgWorld, "Ground Mist")
+	local gmEnabled = gmSec:Toggle({ Name = "Enabled", Default = false, Flag = "gm_enabled" })
+	local gmColor = newColorpicker(gmSec, { Name = "Color", Default = Color3.fromRGB(220, 220, 230), Alpha = 1, Flag = "gm_color" })
+	local gmSettings = settingsOf(gmSec, gmEnabled)
+	local gmRadius  = gmSettings:Slider({ Name = "Radius", Min = 15, Max = 100, Step = 5, Default = 45, Flag = "gm_radius" })
+	local gmOpacity = gmSettings:Slider({ Name = "Opacity", Min = 5, Max = 80, Step = 5, Default = 30, Suffix = "%", Flag = "gm_opacity" })
+	local gmDrift   = gmSettings:Slider({ Name = "Drift speed", Min = 5, Max = 100, Step = 5, Default = 25, Suffix = "%", Flag = "gm_drift" })
+
+	local gmFolder = Instance.new("Folder")
+	gmFolder.Name = "MisanthropyGroundMist"
+	gmFolder.Parent = Workspace
+	table.insert(cleanups, function() if gmFolder then gmFolder:Destroy() end end)
+
+	local GM_LAYERS = 3
+	local gmParts: { BasePart } = {}
+	for _ = 1, GM_LAYERS do
+		local p = Instance.new("Part")
+		p.Name = "MistLayer"
+		p.Shape = Enum.PartType.Cylinder
+		p.Material = Enum.Material.SmoothPlastic
+		p.Anchored = true
+		p.CanCollide = false; p.CanQuery = false; p.CanTouch = false; p.CastShadow = false
+		p.Transparency = 1
+		p.Parent = gmFolder
+		table.insert(gmParts, p)
+	end
+
+	local rsGm = RunService.Heartbeat:Connect(function()
+		if not gmEnabled:Get() then
+			for _, p in ipairs(gmParts) do
+				if p.Transparency ~= 1 then p.Transparency = 1 end
+			end
+			return
+		end
+		local root = getRootPart()
+		if not root then return end
+		local t = os.clock() * (gmDrift:Get() / 100)
+		local radius = gmRadius:Get()
+		local opacity = gmOpacity:Get() / 100
+		local col = gmColor:Get()
+		for i, p in ipairs(gmParts) do
+			local spin = t * (0.15 + i * 0.05) * (i % 2 == 0 and -1 or 1)
+			local yOff = -2.8 + i * 0.3 + math.sin(t * 0.4 + i) * 0.2
+			local d = radius * 2 * (0.85 + i * 0.08)
+			p.Size = Vector3.new(0.6, d, d)
+			p.Color = col
+			p.Transparency = 1 - (opacity * (0.5 / i))
+			p.CFrame = CFrame.new(root.Position + Vector3.new(0, yOff, 0)) * CFrame.Angles(0, 0, math.rad(90)) * CFrame.Angles(spin, 0, 0)
+		end
+	end)
+	table.insert(cleanups, function()
+		rsGm:Disconnect()
+		for _, p in ipairs(gmParts) do p:Destroy() end
+	end)
+
+	CFG.toggles.gm_enabled = gmEnabled
+	CFG.sliders.gm_radius = gmRadius; CFG.sliders.gm_opacity = gmOpacity; CFG.sliders.gm_drift = gmDrift
+	CFG.colors.gm_color = gmColor
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5w4: Embers / Bubbles (shared buildRisingAmbient builder)
+----------------------------------------------------------------------------------
+do
+	-- Same "shared builder, two instances" shape as buildFallingDebris above
+	-- (Leaves Fall / Cherry Blossoms), but for particles that rise and fade
+	-- out at a max height instead of falling and settling on the ground -
+	-- buildFallingDebris's ground-collision/sink logic doesn't apply here,
+	-- so this is its own simpler builder rather than forcing reuse.
+	local function buildRisingAmbient(sectionName: string, folderName: string, partName: string, cfg: any)
+		local sec = newSection(pgWorld, sectionName)
+		local enabled = sec:Toggle({ Name = "Enabled", Default = false, Flag = cfg.prefix .. "_enabled" })
+		local color = newColorpicker(sec, { Name = "Color", Default = cfg.color, Alpha = 1, Flag = cfg.prefix .. "_color" })
+		local settings = settingsOf(sec, enabled)
+		local count     = settings:Slider({ Name = "Max count", Min = 5, Max = 150, Step = 5, Default = cfg.maxCount, Flag = cfg.prefix .. "_count" })
+		local riseSpeed = settings:Slider({ Name = "Rise speed", Min = 5, Max = 100, Step = 5, Default = cfg.riseSpeed, Suffix = "ds", Flag = cfg.prefix .. "_risespeed" })
+		local radius    = settings:Slider({ Name = "Spawn radius", Min = 10, Max = 80, Step = 5, Default = cfg.radius, Flag = cfg.prefix .. "_radius" })
+		local maxHeight = settings:Slider({ Name = "Max height", Min = 5, Max = 60, Step = 5, Default = cfg.maxHeight, Flag = cfg.prefix .. "_maxheight" })
+
+		local folder = Instance.new("Folder")
+		folder.Name = folderName
+		folder.Parent = Workspace
+		table.insert(cleanups, function() if folder then folder:Destroy() end end)
+
+		type Piece = {
+			inst: BasePart, basePos: Vector3, age: number, lifetime: number,
+			swayPhase: number, swaySpeed: number, swayWidth: number,
+		}
+		local active: { Piece } = {}
+
+		local function spawnPiece(root: BasePart)
+			if #active >= count:Get() then return end
+			local p = Instance.new("Part")
+			p.Name = partName
+			p.Shape = Enum.PartType.Ball
+			local sz = cfg.minSize + math.random() * (cfg.maxSize - cfg.minSize)
+			p.Size = Vector3.new(sz, sz, sz)
+			p.Material = cfg.material
+			p.Color = color:Get()
+			p.Transparency = cfg.baseTransparency
+			p.Anchored = true; p.CanCollide = false; p.CanQuery = false; p.CanTouch = false; p.CastShadow = false
+			p.Parent = folder
+			if cfg.glow then
+				local light = Instance.new("PointLight")
+				light.Color = color:Get(); light.Brightness = cfg.glowBrightness; light.Range = cfg.glowRange; light.Shadows = false
+				light.Parent = p
+			end
+			local r = radius:Get()
+			local angle = math.random() * math.pi * 2
+			local dist = math.random() * r
+			local startPos = root.Position + Vector3.new(math.cos(angle) * dist, math.random(-20, 20) / 10, math.sin(angle) * dist)
+			p.Position = startPos
+			table.insert(active, {
+				inst = p, basePos = startPos, age = 0, lifetime = cfg.lifetime + math.random(-20, 20) / 10,
+				swayPhase = math.random(0, 628) / 100, swaySpeed = math.random(5, 15) / 10, swayWidth = math.random(3, 10) / 10,
+			})
+		end
+
+		local function destroyAll()
+			for _, d in ipairs(active) do d.inst:Destroy() end
+			table.clear(active)
+		end
+
+		local function updatePieces(dt: number)
+			local rise = riseSpeed:Get() / 10
+			local capHeight = maxHeight:Get()
+			for i = #active, 1, -1 do
+				local d = active[i]
+				local inst = d.inst
+				if not inst.Parent then table.remove(active, i); continue end
+				d.age += dt
+				local risen = d.age * rise
+				local heightFrac = math.clamp(risen / capHeight, 0, 1)
+				local fadeIn = math.min(d.age / 0.6, 1)
+				local lifeFrac = d.age / d.lifetime
+				local fadeOut = 1 - math.max(heightFrac, math.clamp((lifeFrac - 0.7) / 0.3, 0, 1))
+				if heightFrac >= 1 or d.age >= d.lifetime or fadeOut <= 0 then
+					inst:Destroy(); table.remove(active, i); continue
+				end
+				inst.Transparency = 1 - (math.min(fadeIn, fadeOut) * (1 - cfg.baseTransparency))
+				local sway = math.sin(d.age * d.swaySpeed + d.swayPhase) * d.swayWidth
+				local swayZ = math.cos(d.age * d.swaySpeed * 0.7 + d.swayPhase) * d.swayWidth
+				inst.Position = d.basePos + Vector3.new(sway, risen, swayZ)
+				local light = inst:FindFirstChildOfClass("PointLight")
+				if light then light.Color = color:Get() end
+			end
+		end
+
+		local lastSpawn = 0
+		local rs = RunService.Heartbeat:Connect(function(dt: number)
+			if not enabled:Get() then
+				if #active > 0 then destroyAll() end
+				return
+			end
+			local root = getRootPart()
+			if not root then return end
+			lastSpawn += dt
+			if lastSpawn >= cfg.spawnInterval then
+				lastSpawn = 0
+				spawnPiece(root)
+			end
+			updatePieces(dt)
+		end)
+		table.insert(cleanups, function()
+			rs:Disconnect()
+			destroyAll()
+		end)
+
+		CFG.toggles[cfg.prefix .. "_enabled"] = enabled
+		CFG.sliders[cfg.prefix .. "_count"] = count
+		CFG.sliders[cfg.prefix .. "_risespeed"] = riseSpeed
+		CFG.sliders[cfg.prefix .. "_radius"] = radius
+		CFG.sliders[cfg.prefix .. "_maxheight"] = maxHeight
+		CFG.colors[cfg.prefix .. "_color"] = color
+	end
+
+	buildRisingAmbient("Embers", "MisanthropyEmbers", "Ember", {
+		prefix = "eb", color = Color3.fromRGB(255, 140, 40), maxCount = 60, riseSpeed = 25, radius = 30, maxHeight = 20,
+		minSize = 0.08, maxSize = 0.22, material = Enum.Material.Neon, baseTransparency = 0.1, lifetime = 6,
+		glow = true, glowBrightness = 1.2, glowRange = 4, spawnInterval = 0.08,
+	})
+
+	buildRisingAmbient("Bubbles", "MisanthropyBubbles", "Bubble", {
+		prefix = "bb", color = Color3.fromRGB(180, 220, 255), maxCount = 50, riseSpeed = 15, radius = 25, maxHeight = 18,
+		minSize = 0.15, maxSize = 0.4, material = Enum.Material.Glass, baseTransparency = 0.5, lifetime = 8,
+		glow = false, glowBrightness = 0, glowRange = 0, spawnInterval = 0.12,
+	})
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5w5: Meteor Shower
+----------------------------------------------------------------------------------
+do
+	-- Distinct from StarFall above: rarer, bigger, brighter single streaks
+	-- with a long trail, spawned every few seconds rather than a constant
+	-- sprinkle - a "big moment" effect instead of ambient background motion.
+	local mtSec = newSection(pgWorld, "Meteor Shower")
+	local mtEnabled = mtSec:Toggle({ Name = "Enabled", Default = false, Flag = "mt_enabled" })
+	local mtColor = newColorpicker(mtSec, { Name = "Color", Default = Color3.fromRGB(255, 220, 150), Alpha = 1, Flag = "mt_color" })
+	local mtSettings = settingsOf(mtSec, mtEnabled)
+	local mtFrequency = mtSettings:Slider({ Name = "Frequency", Min = 2, Max = 30, Step = 1, Default = 8, Suffix = "ds", Flag = "mt_frequency" })
+	local mtSize      = mtSettings:Slider({ Name = "Size", Min = 50, Max = 300, Step = 10, Default = 120, Suffix = "%", Flag = "mt_size" })
+	local mtSpeed     = mtSettings:Slider({ Name = "Speed", Min = 20, Max = 200, Step = 10, Default = 80, Suffix = "%", Flag = "mt_speed" })
+
+	local mtFolder = Instance.new("Folder")
+	mtFolder.Name = "MisanthropyMeteorShower"
+	mtFolder.Parent = Workspace
+	table.insert(cleanups, function() if mtFolder then mtFolder:Destroy() end end)
+
+	type Meteor = { inst: BasePart, vel: Vector3, age: number }
+	local meteors: { Meteor } = {}
+
+	local function destroyMeteors()
+		for _, m in ipairs(meteors) do m.inst:Destroy() end
+		table.clear(meteors)
+	end
+
+	local function spawnMeteor(root: BasePart)
+		local p = Instance.new("Part")
+		p.Name = "Meteor"; p.Shape = Enum.PartType.Ball; p.Material = Enum.Material.Neon
+		local sz = 0.6 * (mtSize:Get() / 100)
+		p.Size = Vector3.new(sz, sz, sz)
+		p.Color = mtColor:Get()
+		p.Anchored = true; p.CanCollide = false; p.CanQuery = false; p.CanTouch = false; p.CastShadow = false
+		p.Parent = mtFolder
+		local a0 = Instance.new("Attachment"); a0.Position = Vector3.new(0, sz * 0.5, 0); a0.Parent = p
+		local a1 = Instance.new("Attachment"); a1.Position = Vector3.new(0, -sz * 0.5, 0); a1.Parent = p
+		local trail = Instance.new("Trail")
+		trail.Attachment0 = a0; trail.Attachment1 = a1
+		trail.Color = ColorSequence.new(mtColor:Get())
+		trail.Lifetime = 0.6
+		trail.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.1), NumberSequenceKeypoint.new(1, 1) })
+		trail.WidthScale = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0) })
+		trail.Parent = p
+
+		local angle = math.random() * math.pi * 2
+		local dist = math.random(60, 120)
+		local startPos = root.Position + Vector3.new(math.cos(angle) * dist, 100 + math.random(0, 40), math.sin(angle) * dist)
+		p.Position = startPos
+		local dir = (root.Position - startPos + Vector3.new(math.random(-20, 20), -40, math.random(-20, 20))).Unit
+		table.insert(meteors, { inst = p, vel = dir * (60 * (mtSpeed:Get() / 100)), age = 0 })
+	end
+
+	local lastMeteor = 0
+	local rsMt = RunService.Heartbeat:Connect(function(dt: number)
+		if not mtEnabled:Get() then
+			if #meteors > 0 then destroyMeteors() end
+			return
+		end
+		local root = getRootPart()
+		if not root then return end
+		local now = os.clock()
+		if now - lastMeteor >= mtFrequency:Get() then
+			lastMeteor = now
+			spawnMeteor(root)
+		end
+		for i = #meteors, 1, -1 do
+			local m = meteors[i]
+			if not m.inst.Parent then table.remove(meteors, i); continue end
+			m.age += dt
+			if m.age > 4 or m.inst.Position.Y < root.Position.Y - 5 then
+				m.inst:Destroy(); table.remove(meteors, i); continue
+			end
+			m.inst.Position += m.vel * dt
+		end
+	end)
+	table.insert(cleanups, function()
+		rsMt:Disconnect()
+		destroyMeteors()
+	end)
+
+	CFG.toggles.mt_enabled = mtEnabled
+	CFG.sliders.mt_frequency = mtFrequency; CFG.sliders.mt_size = mtSize; CFG.sliders.mt_speed = mtSpeed
+	CFG.colors.mt_color = mtColor
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5w6: God Rays
+----------------------------------------------------------------------------------
+do
+	local gdSec = newSection(pgWorld, "God Rays")
+	local gdEnabled = gdSec:Toggle({ Name = "Enabled", Default = false, Flag = "gd_enabled" })
+	local gdColor = newColorpicker(gdSec, { Name = "Color", Default = Color3.fromRGB(255, 245, 210), Alpha = 1, Flag = "gd_color" })
+	local gdSettings = settingsOf(gdSec, gdEnabled)
+	local gdIntensity = gdSettings:Slider({ Name = "Intensity", Min = 5, Max = 80, Step = 5, Default = 30, Suffix = "%", Flag = "gd_intensity" })
+	local gdAngle     = gdSettings:Slider({ Name = "Angle", Min = 0, Max = 360, Step = 5, Default = 35, Suffix = "°", Flag = "gd_angle" })
+	local gdCount     = gdSettings:Slider({ Name = "Count", Min = 2, Max = 10, Step = 1, Default = 5, Flag = "gd_count" })
+
+	local gdFolder = Instance.new("Folder")
+	gdFolder.Name = "MisanthropyGodRays"
+	gdFolder.Parent = Workspace
+	table.insert(cleanups, function() if gdFolder then gdFolder:Destroy() end end)
+
+	type Ray = { inst: BasePart, offset: number }
+	local rays: { Ray } = {}
+
+	local function destroyRays()
+		for _, r in ipairs(rays) do r.inst:Destroy() end
+		table.clear(rays)
+	end
+
+	local function buildRays(n: number)
+		destroyRays()
+		for i = 1, n do
+			local p = Instance.new("Part")
+			p.Name = "GodRay"; p.Material = Enum.Material.Neon
+			p.Size = Vector3.new(3 + math.random(0, 20) / 10, 160, 0.2)
+			p.Anchored = true; p.CanCollide = false; p.CanQuery = false; p.CanTouch = false; p.CastShadow = false
+			p.Parent = gdFolder
+			table.insert(rays, { inst = p, offset = (i - (n + 1) / 2) * 14 + math.random(-3, 3) })
+		end
+	end
+
+	local lastGdCount = 0
+	local rsGd = RunService.Heartbeat:Connect(function()
+		if not gdEnabled:Get() then
+			if #rays > 0 then destroyRays() end
+			return
+		end
+		local root = getRootPart()
+		if not root then return end
+		local n = math.floor(gdCount:Get())
+		if n ~= lastGdCount or #rays == 0 then
+			lastGdCount = n
+			buildRays(n)
+		end
+		local t = os.clock()
+		local angle = math.rad(gdAngle:Get())
+		local intensity = gdIntensity:Get() / 100
+		local col = gdColor:Get()
+		local dirFlat = Vector3.new(math.cos(angle), 0, math.sin(angle))
+		for _, r in ipairs(rays) do
+			local sway = math.sin(t * 0.15 + r.offset) * 3
+			local pos = root.Position + dirFlat * (40 + r.offset + sway) + Vector3.new(0, 60, 0)
+			r.inst.Position = pos
+			r.inst.Color = col
+			r.inst.Transparency = 1 - intensity * (0.5 + math.sin(t * 0.2 + r.offset) * 0.2)
+			r.inst.CFrame = CFrame.new(pos) * CFrame.Angles(0, angle, 0) * CFrame.Angles(0, 0, math.rad(18))
+		end
+	end)
+	table.insert(cleanups, function()
+		rsGd:Disconnect()
+		destroyRays()
+	end)
+
+	CFG.toggles.gd_enabled = gdEnabled
+	CFG.sliders.gd_intensity = gdIntensity; CFG.sliders.gd_angle = gdAngle; CFG.sliders.gd_count = gdCount
+	CFG.colors.gd_color = gdColor
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5w7: Distant Storm
+----------------------------------------------------------------------------------
+do
+	-- Silent horizon flashes, separate from Thunder above (which is
+	-- up-close bolts + sound). No SkyDome/Lighting.Brightness flicker here -
+	-- just a big, far-away dim panel that briefly brightens, so it reads as
+	-- "storm on the horizon" without touching global lighting.
+	local dsSec = newSection(pgWorld, "Distant Storm")
+	local dsEnabled = dsSec:Toggle({ Name = "Enabled", Default = false, Flag = "ds_enabled" })
+	local dsColor = newColorpicker(dsSec, { Name = "Color", Default = Color3.fromRGB(210, 220, 255), Alpha = 1, Flag = "ds_color" })
+	local dsSettings = settingsOf(dsSec, dsEnabled)
+	local dsFrequency = dsSettings:Slider({ Name = "Frequency", Min = 3, Max = 40, Step = 1, Default = 10, Suffix = "ds", Flag = "ds_frequency" })
+	local dsDistance  = dsSettings:Slider({ Name = "Distance", Min = 150, Max = 500, Step = 10, Default = 300, Flag = "ds_distance" })
+
+	local dsFolder = Instance.new("Folder")
+	dsFolder.Name = "MisanthropyDistantStorm"
+	dsFolder.Parent = Workspace
+	table.insert(cleanups, function() if dsFolder then dsFolder:Destroy() end end)
+
+	local dsPanel = Instance.new("Part")
+	dsPanel.Name = "StormFlash"; dsPanel.Material = Enum.Material.Neon
+	dsPanel.Size = Vector3.new(120, 80, 0.5)
+	dsPanel.Anchored = true; dsPanel.CanCollide = false; dsPanel.CanQuery = false; dsPanel.CanTouch = false; dsPanel.CastShadow = false
+	dsPanel.Transparency = 1
+	dsPanel.Parent = dsFolder
+
+	local DsTweenService = game:GetService("TweenService")
+	local dsLastFlash = 0
+	local rsDs = RunService.Heartbeat:Connect(function()
+		if not dsEnabled:Get() then
+			if dsPanel.Transparency ~= 1 then dsPanel.Transparency = 1 end
+			return
+		end
+		local root = getRootPart()
+		if not root then return end
+		local now = os.clock()
+		if now - dsLastFlash >= dsFrequency:Get() then
+			dsLastFlash = now
+			local angle = math.random() * math.pi * 2
+			local dist = dsDistance:Get()
+			local pos = root.Position + Vector3.new(math.cos(angle) * dist, math.random(20, 60), math.sin(angle) * dist)
+			dsPanel.Color = dsColor:Get()
+			dsPanel.CFrame = CFrame.new(pos, root.Position)
+			dsPanel.Transparency = 1
+			local flashIn = DsTweenService:Create(dsPanel, TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Transparency = 0.55 })
+			flashIn:Play()
+			flashIn.Completed:Connect(function()
+				local flashOut = DsTweenService:Create(dsPanel, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { Transparency = 1 })
+				flashOut:Play()
+			end)
+		end
+	end)
+	table.insert(cleanups, function() rsDs:Disconnect() end)
+
+	CFG.toggles.ds_enabled = dsEnabled
+	CFG.sliders.ds_frequency = dsFrequency; CFG.sliders.ds_distance = dsDistance
+	CFG.colors.ds_color = dsColor
+end
+
+----------------------------------------------------------------------------------
 -- SECTION 5x: Aura Pulse
 ----------------------------------------------------------------------------------
 do
@@ -14247,6 +14856,670 @@ do
 	CFG.sliders.ap_orbitradius = apOrbitRadius; CFG.sliders.ap_orbitspeed = apOrbitSpeed
 	CFG.sliders.ap_pulseevery = apPulseEvery; CFG.sliders.ap_maxsize = apMaxSize
 	CFG.colors.ap_color1 = apColor1; CFG.colors.ap_color2 = apColor2
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5x2: Aura Rings
+----------------------------------------------------------------------------------
+do
+	-- Distinct from Aura Pulse above (orbiting comet orbs + an occasional
+	-- single expanding pulse sphere): this is a continuous stream of flat
+	-- rings spawned on a short interval, each one both expanding outward AND
+	-- rising from the feet up through the body before fading, so several are
+	-- always overlapping mid-rise at once. Same flat-disc-via-rotated-
+	-- Cylinder technique as the Footsteps shockwave above.
+	local rgSec = newSection(pgCharacter, "Aura Rings")
+	local rgEnabled = rgSec:Toggle({ Name = "Enabled", Default = false, Flag = "rg_enabled" })
+	local rgColor = newColorpicker(rgSec, { Name = "Color", Default = Color3.fromRGB(160, 32, 240), Alpha = 1, Flag = "rg_color" })
+	local rgSettings = settingsOf(rgSec, rgEnabled)
+	local rgInterval  = rgSettings:Slider({ Name = "Ring interval", Min = 2, Max = 20, Step = 1, Default = 6, Suffix = "ds", Flag = "rg_interval" })
+	local rgMaxRadius = rgSettings:Slider({ Name = "Max radius", Min = 5, Max = 40, Step = 1, Default = 15, Flag = "rg_maxradius" })
+	local rgRiseSpeed = rgSettings:Slider({ Name = "Rise speed", Min = 5, Max = 100, Step = 5, Default = 35, Suffix = "%", Flag = "rg_risespeed" })
+	local rgHeight    = rgSettings:Slider({ Name = "Rise height", Min = 3, Max = 15, Step = 1, Default = 7, Flag = "rg_height" })
+	local rgRainbow   = rgSettings:Toggle({ Name = "Rainbow", Default = false, Flag = "rg_rainbow" })
+
+	local rgFolder = Instance.new("Folder")
+	rgFolder.Name = "MisanthropyAuraRings"
+	rgFolder.Parent = Workspace
+	table.insert(cleanups, function() if rgFolder then rgFolder:Destroy() end end)
+
+	type Ring = { inst: BasePart, age: number }
+	local rings: { Ring } = {}
+
+	local function destroyRings()
+		for _, r in ipairs(rings) do r.inst:Destroy() end
+		table.clear(rings)
+	end
+
+	local function spawnRing(root: BasePart, col: Color3)
+		local ring = Instance.new("Part")
+		ring.Name = "AuraRing"
+		ring.Shape = Enum.PartType.Cylinder
+		ring.Material = Enum.Material.Neon
+		ring.Color = col
+		ring.Size = Vector3.new(0.05, 0.4, 0.4)
+		ring.Anchored = true
+		ring.CanCollide = false; ring.CanQuery = false; ring.CanTouch = false; ring.CastShadow = false
+		ring.Transparency = 0.2
+		ring.Parent = rgFolder
+		ring.CFrame = CFrame.new(root.Position - Vector3.new(0, 3, 0)) * CFrame.Angles(0, 0, math.rad(90))
+		table.insert(rings, { inst = ring, age = 0 })
+	end
+
+	local lastRingTime = 0
+	local rsRg = RunService.Heartbeat:Connect(function(dt: number)
+		if not rgEnabled:Get() then
+			if #rings > 0 then destroyRings() end
+			return
+		end
+		local root = getRootPart()
+		if not root then return end
+
+		local now = os.clock()
+		local interval = rgInterval:Get() / 10
+		if now - lastRingTime >= interval then
+			lastRingTime = now
+			local col = rgRainbow:Get() and Color3.fromHSV((now * 0.15) % 1, 0.9, 1) or rgColor:Get()
+			spawnRing(root, col)
+		end
+
+		local riseSpeed = rgRiseSpeed:Get() / 100 * 5
+		local riseHeight = rgHeight:Get()
+		local maxRadius = rgMaxRadius:Get() / 10
+		for i = #rings, 1, -1 do
+			local r = rings[i]
+			local inst = r.inst
+			if not inst.Parent then table.remove(rings, i); continue end
+			r.age += dt
+			local risen = r.age * riseSpeed
+			local heightFrac = math.clamp(risen / riseHeight, 0, 1)
+			if heightFrac >= 1 then
+				inst:Destroy(); table.remove(rings, i); continue
+			end
+			local size = 0.05 + heightFrac * maxRadius
+			inst.Size = Vector3.new(0.05, size, size)
+			inst.Transparency = 0.2 + heightFrac * 0.8
+			inst.CFrame = CFrame.new(root.Position - Vector3.new(0, 3, 0) + Vector3.new(0, risen, 0)) * CFrame.Angles(0, 0, math.rad(90))
+		end
+	end)
+	table.insert(cleanups, function()
+		rsRg:Disconnect()
+		destroyRings()
+	end)
+
+	CFG.toggles.rg_enabled = rgEnabled; CFG.toggles.rg_rainbow = rgRainbow
+	CFG.sliders.rg_interval = rgInterval; CFG.sliders.rg_maxradius = rgMaxRadius
+	CFG.sliders.rg_risespeed = rgRiseSpeed; CFG.sliders.rg_height = rgHeight
+	CFG.colors.rg_color = rgColor
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5x3: Ground Runes
+----------------------------------------------------------------------------------
+do
+	local grSec = newSection(pgCharacter, "Ground Runes")
+	local grEnabled = grSec:Toggle({ Name = "Enabled", Default = false, Flag = "gr_enabled" })
+	local grColor = newColorpicker(grSec, { Name = "Color", Default = Color3.fromRGB(120, 200, 255), Alpha = 1, Flag = "gr_color" })
+	local grSettings = settingsOf(grSec, grEnabled)
+	local grDelay = grSettings:Slider({ Name = "Idle delay", Min = 2, Max = 30, Step = 1, Default = 5, Suffix = "ds", Flag = "gr_delay" })
+	local grSize  = grSettings:Slider({ Name = "Size", Min = 5, Max = 30, Step = 1, Default = 12, Flag = "gr_size" })
+
+	local grFolder = Instance.new("Folder")
+	grFolder.Name = "MisanthropyGroundRunes"
+	grFolder.Parent = Workspace
+	table.insert(cleanups, function() if grFolder then grFolder:Destroy() end end)
+
+	local outerRing = Instance.new("Part")
+	outerRing.Name = "RuneOuter"; outerRing.Shape = Enum.PartType.Cylinder; outerRing.Material = Enum.Material.Neon
+	outerRing.Anchored = true; outerRing.CanCollide = false; outerRing.CanQuery = false; outerRing.CanTouch = false; outerRing.CastShadow = false
+	outerRing.Transparency = 1; outerRing.Parent = grFolder
+
+	local innerRing = Instance.new("Part")
+	innerRing.Name = "RuneInner"; innerRing.Shape = Enum.PartType.Cylinder; innerRing.Material = Enum.Material.Neon
+	innerRing.Anchored = true; innerRing.CanCollide = false; innerRing.CanQuery = false; innerRing.CanTouch = false; innerRing.CastShadow = false
+	innerRing.Transparency = 1; innerRing.Parent = grFolder
+
+	local GR_TICKS = 8
+	local tickParts: { BasePart } = {}
+	for _ = 1, GR_TICKS do
+		local t = Instance.new("Part")
+		t.Name = "RuneTick"; t.Material = Enum.Material.Neon
+		t.Anchored = true; t.CanCollide = false; t.CanQuery = false; t.CanTouch = false; t.CastShadow = false
+		t.Transparency = 1; t.Size = Vector3.new(0.15, 0.05, 1)
+		t.Parent = grFolder
+		table.insert(tickParts, t)
+	end
+
+	local stationaryTime = 0
+	local lastPos: Vector3? = nil
+	local rsGr = RunService.Heartbeat:Connect(function(dt: number)
+		local root = getRootPart()
+		if not grEnabled:Get() or not root then
+			outerRing.Transparency = 1; innerRing.Transparency = 1
+			for _, t in ipairs(tickParts) do t.Transparency = 1 end
+			stationaryTime = 0; lastPos = nil
+			return
+		end
+		local pos = root.Position
+		local moving = lastPos and (pos - lastPos).Magnitude > 0.03
+		lastPos = pos
+		if moving then
+			stationaryTime = 0
+		else
+			stationaryTime += dt
+		end
+
+		local delay = grDelay:Get() / 10
+		local fade = math.clamp((stationaryTime - delay) / 0.6, 0, 1)
+		local size = grSize:Get()
+		local col = grColor:Get()
+		local t = os.clock()
+
+		outerRing.Color = col; innerRing.Color = col
+		outerRing.Size = Vector3.new(0.06, size, size)
+		innerRing.Size = Vector3.new(0.06, size * 0.6, size * 0.6)
+		outerRing.Transparency = fade > 0 and (0.35 + math.sin(t * 2) * 0.1 * fade + (1 - fade)) or 1
+		innerRing.Transparency = outerRing.Transparency
+		local base = pos - Vector3.new(0, 3, 0)
+		outerRing.CFrame = CFrame.new(base) * CFrame.Angles(0, t * 0.3, 0) * CFrame.Angles(0, 0, math.rad(90))
+		innerRing.CFrame = CFrame.new(base) * CFrame.Angles(0, -t * 0.5, 0) * CFrame.Angles(0, 0, math.rad(90))
+
+		for i, tick in ipairs(tickParts) do
+			local a = (i / GR_TICKS) * math.pi * 2 + t * 0.3
+			local r = size * 0.5
+			tick.Color = col
+			tick.Transparency = outerRing.Transparency
+			tick.CFrame = CFrame.new(base + Vector3.new(math.cos(a) * r, 0, math.sin(a) * r)) * CFrame.Angles(0, a, 0)
+		end
+	end)
+	table.insert(cleanups, function() rsGr:Disconnect() end)
+
+	CFG.toggles.gr_enabled = grEnabled
+	CFG.sliders.gr_delay = grDelay; CFG.sliders.gr_size = grSize
+	CFG.colors.gr_color = grColor
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5x4: Cape
+----------------------------------------------------------------------------------
+do
+	local cpSec = newSection(pgCharacter, "Cape")
+	local cpEnabled = cpSec:Toggle({ Name = "Enabled", Default = false, Flag = "cp_enabled" })
+	local cpColor = newColorpicker(cpSec, { Name = "Color", Default = Color3.fromRGB(160, 20, 30), Alpha = 1, Flag = "cp_color" })
+	local cpSettings = settingsOf(cpSec, cpEnabled)
+	local cpLength = cpSettings:Slider({ Name = "Length", Min = 3, Max = 12, Step = 1, Default = 6, Flag = "cp_length" })
+	local cpSway   = cpSettings:Slider({ Name = "Sway", Min = 0, Max = 100, Step = 5, Default = 40, Suffix = "%", Flag = "cp_sway" })
+
+	local cpFolder = Instance.new("Folder")
+	cpFolder.Name = "MisanthropyCape"
+	cpFolder.Parent = Workspace
+	table.insert(cleanups, function() if cpFolder then cpFolder:Destroy() end end)
+
+	local CP_SEGS = 6
+	local segments: { BasePart } = {}
+	local segLag: { Vector3 } = {}
+	for _ = 1, CP_SEGS do
+		local p = Instance.new("Part")
+		p.Name = "CapeSegment"; p.Material = Enum.Material.Fabric
+		p.Anchored = true; p.CanCollide = false; p.CanQuery = false; p.CanTouch = false; p.CastShadow = false
+		p.Transparency = 1
+		p.Parent = cpFolder
+		table.insert(segments, p)
+		table.insert(segLag, Vector3.zero)
+	end
+
+	local lastRootPos: Vector3? = nil
+	local rsCp = RunService.Heartbeat:Connect(function(dt: number)
+		local root = getRootPart()
+		if not cpEnabled:Get() or not root then
+			for _, s in ipairs(segments) do s.Transparency = 1 end
+			lastRootPos = nil
+			return
+		end
+		local vel = lastRootPos and (root.Position - lastRootPos) / math.max(dt, 1 / 240) or Vector3.zero
+		lastRootPos = root.Position
+		local horizVel = Vector3.new(vel.X, 0, vel.Z)
+		local swayAmt = cpSway:Get() / 100
+		local segLen = cpLength:Get() / CP_SEGS
+		local col = cpColor:Get()
+		local t = os.clock()
+		local back = -root.CFrame.LookVector
+
+		local anchor = root.Position + Vector3.new(0, 0.8, 0) + back * 0.6
+		for i, seg in ipairs(segments) do
+			local target = anchor + back * (segLen * i) - Vector3.new(0, segLen * i * 0.35, 0)
+				- horizVel * (0.05 * i) + Vector3.new(math.sin(t * 1.5 + i) * 0.3 * swayAmt, 0, math.cos(t * 1.3 + i) * 0.3 * swayAmt)
+			segLag[i] = segLag[i]:Lerp(target, 1 - math.exp(-8 * dt))
+			seg.Size = Vector3.new(1.4 - i * 0.08, segLen * 1.1, 0.08)
+			seg.Color = col
+			seg.Transparency = 0.1
+			local look = (i == 1) and (segLag[i] - anchor) or (segLag[i] - segLag[i - 1])
+			local lookDir = look.Magnitude > 0.01 and look.Unit or back
+			seg.CFrame = CFrame.new(segLag[i], segLag[i] + lookDir) * CFrame.Angles(math.rad(90), 0, 0)
+		end
+	end)
+	table.insert(cleanups, function() rsCp:Disconnect() end)
+
+	CFG.toggles.cp_enabled = cpEnabled
+	CFG.sliders.cp_length = cpLength; CFG.sliders.cp_sway = cpSway
+	CFG.colors.cp_color = cpColor
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5x5: Constellation
+----------------------------------------------------------------------------------
+do
+	local csSec = newSection(pgCharacter, "Constellation")
+	local csEnabled = csSec:Toggle({ Name = "Enabled", Default = false, Flag = "cs_enabled" })
+	local csColor = newColorpicker(csSec, { Name = "Color", Default = Color3.fromRGB(255, 255, 255), Alpha = 1, Flag = "cs_color" })
+	local csSettings = settingsOf(csSec, csEnabled)
+	local csCount  = csSettings:Slider({ Name = "Star count", Min = 3, Max = 20, Step = 1, Default = 8, Flag = "cs_count" })
+	local csRadius = csSettings:Slider({ Name = "Radius", Min = 2, Max = 10, Step = 1, Default = 4, Flag = "cs_radius" })
+
+	local csFolder = Instance.new("Folder")
+	csFolder.Name = "MisanthropyConstellation"
+	csFolder.Parent = Workspace
+	table.insert(cleanups, function() if csFolder then csFolder:Destroy() end end)
+
+	type Star = { inst: BasePart, seed: number, phase: number, incline: number }
+	local stars: { Star } = {}
+
+	local function destroyStars()
+		for _, s in ipairs(stars) do s.inst:Destroy() end
+		table.clear(stars)
+	end
+
+	local function buildStars(n: number)
+		destroyStars()
+		for i = 1, n do
+			local p = Instance.new("Part")
+			p.Name = "Star"; p.Shape = Enum.PartType.Ball; p.Material = Enum.Material.Neon
+			p.Anchored = true; p.CanCollide = false; p.CanQuery = false; p.CanTouch = false; p.CastShadow = false
+			p.Parent = csFolder
+			table.insert(stars, { inst = p, seed = math.random() * 1000, phase = (i / n) * math.pi * 2, incline = math.random() * math.pi })
+		end
+	end
+
+	local lastCsCount = 0
+	local rsCs = RunService.Heartbeat:Connect(function()
+		if not csEnabled:Get() then
+			if #stars > 0 then destroyStars() end
+			return
+		end
+		local root = getRootPart()
+		if not root then return end
+		local n = math.floor(csCount:Get())
+		if n ~= lastCsCount or #stars == 0 then
+			lastCsCount = n
+			buildStars(n)
+		end
+		local t = os.clock()
+		local radius = csRadius:Get()
+		local col = csColor:Get()
+		local headPos = root.Position + Vector3.new(0, 3, 0)
+		for _, s in ipairs(stars) do
+			local a = t * 0.4 + s.phase
+			local x = math.cos(a) * radius
+			local z = math.sin(a) * radius * math.cos(s.incline)
+			local y = math.sin(a) * radius * math.sin(s.incline) * 0.6
+			s.inst.Position = headPos + Vector3.new(x, y, z)
+			local twinkle = 0.5 + math.noise(t * 1.5 + s.seed, 0) * 0.5
+			local sz = 0.08 + twinkle * 0.08
+			s.inst.Size = Vector3.new(sz, sz, sz)
+			s.inst.Color = col
+			s.inst.Transparency = 0.2 + (1 - twinkle) * 0.5
+		end
+	end)
+	table.insert(cleanups, function()
+		rsCs:Disconnect()
+		destroyStars()
+	end)
+
+	CFG.toggles.cs_enabled = csEnabled
+	CFG.sliders.cs_count = csCount; CFG.sliders.cs_radius = csRadius
+	CFG.colors.cs_color = csColor
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5x6: Crystal Shards
+----------------------------------------------------------------------------------
+do
+	local cySec = newSection(pgCharacter, "Crystal Shards")
+	local cyEnabled = cySec:Toggle({ Name = "Enabled", Default = false, Flag = "cy_enabled" })
+	local cyColor = newColorpicker(cySec, { Name = "Color", Default = Color3.fromRGB(150, 220, 255), Alpha = 1, Flag = "cy_color" })
+	local cySettings = settingsOf(cySec, cyEnabled)
+	local cyCount  = cySettings:Slider({ Name = "Shard count", Min = 2, Max = 12, Step = 1, Default = 5, Flag = "cy_count" })
+	local cyRadius = cySettings:Slider({ Name = "Orbit radius", Min = 3, Max = 20, Step = 1, Default = 6, Flag = "cy_radius" })
+	local cySpeed  = cySettings:Slider({ Name = "Orbit speed", Min = 5, Max = 100, Step = 5, Default = 30, Suffix = "%", Flag = "cy_speed" })
+
+	local cyFolder = Instance.new("Folder")
+	cyFolder.Name = "MisanthropyCrystalShards"
+	cyFolder.Parent = Workspace
+	table.insert(cleanups, function() if cyFolder then cyFolder:Destroy() end end)
+
+	type Shard = { inst: BasePart, phase: number, tumble: Vector3, heightPhase: number }
+	local shards: { Shard } = {}
+
+	local function destroyShards()
+		for _, s in ipairs(shards) do s.inst:Destroy() end
+		table.clear(shards)
+	end
+
+	local function buildShards(n: number)
+		destroyShards()
+		for i = 1, n do
+			local p = Instance.new("Part")
+			p.Name = "Shard"; p.Material = Enum.Material.Glass
+			p.Size = Vector3.new(0.3, math.random(6, 12) / 10, 0.3)
+			p.Anchored = true; p.CanCollide = false; p.CanQuery = false; p.CanTouch = false; p.CastShadow = false
+			p.Parent = cyFolder
+			table.insert(shards, {
+				inst = p, phase = (i / n) * math.pi * 2,
+				tumble = Vector3.new(math.random(-90, 90), math.random(-90, 90), math.random(-90, 90)),
+				heightPhase = math.random() * math.pi * 2,
+			})
+		end
+	end
+
+	local lastCyCount = 0
+	local rsCy = RunService.Heartbeat:Connect(function()
+		if not cyEnabled:Get() then
+			if #shards > 0 then destroyShards() end
+			return
+		end
+		local root = getRootPart()
+		if not root then return end
+		local n = math.floor(cyCount:Get())
+		if n ~= lastCyCount or #shards == 0 then
+			lastCyCount = n
+			buildShards(n)
+		end
+		local t = os.clock() * (cySpeed:Get() / 100)
+		local radius = cyRadius:Get()
+		local col = cyColor:Get()
+		local rootPos = root.Position
+		for _, s in ipairs(shards) do
+			local a = t + s.phase
+			local pos = rootPos + Vector3.new(math.cos(a) * radius, 2.5 + math.sin(t * 0.8 + s.heightPhase) * 1.2, math.sin(a) * radius)
+			s.inst.Position = pos
+			s.inst.Color = col
+			s.inst.CFrame = CFrame.new(pos) * CFrame.Angles(
+				math.rad(s.tumble.X * t), math.rad(s.tumble.Y * t), math.rad(s.tumble.Z * t)
+			)
+		end
+	end)
+	table.insert(cleanups, function()
+		rsCy:Disconnect()
+		destroyShards()
+	end)
+
+	CFG.toggles.cy_enabled = cyEnabled
+	CFG.sliders.cy_count = cyCount; CFG.sliders.cy_radius = cyRadius; CFG.sliders.cy_speed = cySpeed
+	CFG.colors.cy_color = cyColor
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5x7: Ink Trail
+----------------------------------------------------------------------------------
+do
+	-- Distinct from Trail above (a thin ribbon Trail instance): this is a
+	-- billowing ParticleEmitter smoke plume trailing behind, using the same
+	-- built-in rbxasset:// particle texture family already confirmed working
+	-- elsewhere in this file (fire_main.dds on Floating Lamps, sparkles_main.dds
+	-- on Fireflies/Aura Pulse) rather than guessing at a new asset ID.
+	local ikSec = newSection(pgCharacter, "Ink Trail")
+	local ikEnabled = ikSec:Toggle({ Name = "Enabled", Default = false, Flag = "ik_enabled" })
+	local ikColor = newColorpicker(ikSec, { Name = "Color", Default = Color3.fromRGB(20, 20, 30), Alpha = 1, Flag = "ik_color" })
+	local ikSettings = settingsOf(ikSec, ikEnabled)
+	local ikDensity = ikSettings:Slider({ Name = "Density", Min = 5, Max = 60, Step = 5, Default = 20, Flag = "ik_density" })
+	local ikSize    = ikSettings:Slider({ Name = "Size", Min = 50, Max = 300, Step = 10, Default = 120, Suffix = "%", Flag = "ik_size" })
+
+	local ikFolder = Instance.new("Folder")
+	ikFolder.Name = "MisanthropyInkTrail"
+	ikFolder.Parent = Workspace
+	table.insert(cleanups, function() if ikFolder then ikFolder:Destroy() end end)
+
+	local ikPart = Instance.new("Part")
+	ikPart.Name = "InkSource"
+	ikPart.Anchored = true; ikPart.CanCollide = false; ikPart.CanQuery = false; ikPart.CanTouch = false; ikPart.CastShadow = false
+	ikPart.Transparency = 1; ikPart.Size = Vector3.new(0.2, 0.2, 0.2)
+	ikPart.Parent = ikFolder
+
+	local ikEmitter = Instance.new("ParticleEmitter")
+	ikEmitter.Texture = "rbxasset://textures/particles/smoke_main.dds"
+	ikEmitter.Enabled = false
+	ikEmitter.Lifetime = NumberRange.new(1, 1.8)
+	ikEmitter.Speed = NumberRange.new(0.5, 1.5)
+	ikEmitter.SpreadAngle = Vector2.new(25, 25)
+	ikEmitter.RotSpeed = NumberRange.new(-30, 30)
+	ikEmitter.LightInfluence = 1
+	ikEmitter.Parent = ikPart
+
+	local rsIk = RunService.Heartbeat:Connect(function()
+		local root = getRootPart()
+		if not ikEnabled:Get() or not root then
+			ikEmitter.Enabled = false
+			return
+		end
+		local sizeMul = ikSize:Get() / 100
+		ikEmitter.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.6 * sizeMul), NumberSequenceKeypoint.new(1, 1.8 * sizeMul) })
+		ikEmitter.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.4), NumberSequenceKeypoint.new(1, 1) })
+		ikEmitter.Color = ColorSequence.new(ikColor:Get())
+		ikEmitter.Rate = ikDensity:Get()
+		ikEmitter.Enabled = true
+		ikPart.CFrame = root.CFrame * CFrame.new(0, -0.5, 1.2)
+	end)
+	table.insert(cleanups, function() rsIk:Disconnect() end)
+
+	CFG.toggles.ik_enabled = ikEnabled
+	CFG.sliders.ik_density = ikDensity; CFG.sliders.ik_size = ikSize
+	CFG.colors.ik_color = ikColor
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5x8: Wings
+----------------------------------------------------------------------------------
+do
+	-- No mesh asset ID guessed for wings - each wing is built from flat,
+	-- tapered Parts fanned out from a shoulder pivot, matching how Footsteps'
+	-- shapes and Cape's segments are built from plain Parts rather than
+	-- external mesh assets.
+	local wgSec = newSection(pgCharacter, "Wings")
+	local wgEnabled = wgSec:Toggle({ Name = "Enabled", Default = false, Flag = "wg_enabled" })
+	local wgColor = newColorpicker(wgSec, { Name = "Color", Default = Color3.fromRGB(255, 255, 255), Alpha = 1, Flag = "wg_color" })
+	local wgSettings = settingsOf(wgSec, wgEnabled)
+	local wgSize  = wgSettings:Slider({ Name = "Size", Min = 50, Max = 250, Step = 10, Default = 100, Suffix = "%", Flag = "wg_size" })
+	local wgFlap  = wgSettings:Slider({ Name = "Flap speed", Min = 0, Max = 100, Step = 5, Default = 30, Suffix = "%", Flag = "wg_flap" })
+
+	local wgFolder = Instance.new("Folder")
+	wgFolder.Name = "MisanthropyWings"
+	wgFolder.Parent = Workspace
+	table.insert(cleanups, function() if wgFolder then wgFolder:Destroy() end end)
+
+	local WG_FEATHERS = 5
+	local function buildWing(side: number): { BasePart }
+		local feathers = {}
+		for i = 1, WG_FEATHERS do
+			local f = Instance.new("Part")
+			f.Name = "Feather"; f.Material = Enum.Material.Neon
+			f.Anchored = true; f.CanCollide = false; f.CanQuery = false; f.CanTouch = false; f.CastShadow = false
+			f.Size = Vector3.new(0.06, 0.3, (WG_FEATHERS - i + 2) * 0.4)
+			f.Transparency = 1
+			f.Parent = wgFolder
+			table.insert(feathers, f)
+		end
+		return feathers
+	end
+	local leftWing, rightWing = buildWing(-1), buildWing(1)
+
+	local rsWg = RunService.Heartbeat:Connect(function()
+		local root = getRootPart()
+		if not wgEnabled:Get() or not root then
+			for _, f in ipairs(leftWing) do f.Transparency = 1 end
+			for _, f in ipairs(rightWing) do f.Transparency = 1 end
+			return
+		end
+		local t = os.clock()
+		local flap = math.sin(t * (2 + wgFlap:Get() / 100 * 6)) * (0.15 + wgFlap:Get() / 100 * 0.35)
+		local scale = wgSize:Get() / 100
+		local col = wgColor:Get()
+		local pivotBase = root.CFrame * CFrame.new(0, 0.5, 0.6)
+		for _, side in ipairs({ { wing = leftWing, dir = -1 }, { wing = rightWing, dir = 1 } }) do
+			for i, f in ipairs(side.wing) do
+				local spreadAngle = math.rad(20 + i * 18) * side.dir
+				local flapAngle = flap * (0.5 + i * 0.15)
+				local reach = 0.6 + i * (0.55 * scale)
+				local pivot = pivotBase * CFrame.Angles(0, 0, spreadAngle + flapAngle * side.dir)
+				f.Size = Vector3.new(0.06, 0.3 * scale, (WG_FEATHERS - i + 2) * 0.4 * scale)
+				f.Color = col
+				f.Transparency = 0.15
+				f.CFrame = pivot * CFrame.new(0, 0, reach)
+			end
+		end
+	end)
+	table.insert(cleanups, function() rsWg:Disconnect() end)
+
+	CFG.toggles.wg_enabled = wgEnabled
+	CFG.sliders.wg_size = wgSize; CFG.sliders.wg_flap = wgFlap
+	CFG.colors.wg_color = wgColor
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5x9: Chroma Skin
+----------------------------------------------------------------------------------
+do
+	-- Independent of Model Skin's static material override above - this is
+	-- purely an animated rainbow color cycle, no material dropdown/body
+	-- tint options. Has its own savedColor/savedMaterial restore table since
+	-- it mutates the same char:GetDescendants() BaseParts Model Skin's
+	-- material override does - running both at once will visibly fight over
+	-- .Color each frame (whichever section's Heartbeat runs later wins that
+	-- frame), so that's a known interaction, not a bug, if both are enabled
+	-- simultaneously.
+	local chSec = newSection(pgCharacter, "Chroma Skin")
+	local chEnabled = chSec:Toggle({ Name = "Enabled", Default = false, Flag = "ch_enabled" })
+	local chSettings = settingsOf(chSec, chEnabled)
+	local chSpeedSlider = chSettings:Slider({ Name = "Cycle speed", Min = 5, Max = 100, Step = 5, Default = 25, Suffix = "%", Flag = "ch_speed" })
+
+	local chSavedColor: { [BasePart]: Color3 } = {}
+	local chSavedMaterial: { [BasePart]: Enum.Material } = {}
+
+	local function chRestore()
+		for part in pairs(chSavedColor) do
+			if part and part.Parent then
+				part.Color = chSavedColor[part]
+				if chSavedMaterial[part] then part.Material = chSavedMaterial[part] end
+			end
+		end
+		table.clear(chSavedColor); table.clear(chSavedMaterial)
+	end
+
+	local rsCh = RunService.Heartbeat:Connect(function()
+		local char = getCharacter()
+		if not chEnabled:Get() or not char then
+			if next(chSavedColor) then chRestore() end
+			return
+		end
+		local hue = (os.clock() * (chSpeedSlider:Get() / 100) * 0.2) % 1
+		for _, d in ipairs(char:GetDescendants()) do
+			if d:IsA("BasePart") and d.Name ~= "HumanoidRootPart" then
+				if chSavedColor[d] == nil then
+					chSavedColor[d] = d.Color
+					chSavedMaterial[d] = d.Material
+				end
+				d.Color = Color3.fromHSV(hue, 0.85, 1)
+			end
+		end
+	end)
+	table.insert(cleanups, function()
+		rsCh:Disconnect()
+		chRestore()
+	end)
+
+	CFG.toggles.ch_enabled = chEnabled
+	CFG.sliders.ch_speed = chSpeedSlider
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5x10: Landing Shockwave
+----------------------------------------------------------------------------------
+do
+	-- Fires once per real landing (Freefall -> Landed on the current
+	-- Humanoid, re-hooked per respawn the same way Movement re-baselines
+	-- MaxSlopeAngle per character), not on every footstep - complements
+	-- Footsteps' own optional shockwave rather than duplicating it.
+	local lsSec = newSection(pgCharacter, "Landing Shockwave")
+	local lsEnabled = lsSec:Toggle({ Name = "Enabled", Default = false, Flag = "ls_enabled" })
+	local lsColor = newColorpicker(lsSec, { Name = "Color", Default = Color3.fromRGB(255, 255, 255), Alpha = 1, Flag = "ls_color" })
+	local lsSettings = settingsOf(lsSec, lsEnabled)
+	local lsSize = lsSettings:Slider({ Name = "Size", Min = 5, Max = 60, Step = 5, Default = 20, Flag = "ls_size" })
+
+	local lsFolder = Instance.new("Folder")
+	lsFolder.Name = "MisanthropyLandingShockwave"
+	lsFolder.Parent = Workspace
+	table.insert(cleanups, function() if lsFolder then lsFolder:Destroy() end end)
+
+	local LsTweenService = game:GetService("TweenService")
+	local function spawnLandingRing(pos: Vector3)
+		local ring = Instance.new("Part")
+		ring.Name = "LandingRing"
+		ring.Shape = Enum.PartType.Cylinder
+		ring.Material = Enum.Material.Neon
+		ring.Color = lsColor:Get()
+		ring.Size = Vector3.new(0.05, 0.4, 0.4)
+		ring.CFrame = CFrame.new(pos) * CFrame.Angles(0, 0, math.rad(90))
+		ring.Transparency = 0.1
+		ring.Anchored = true
+		ring.CanCollide = false; ring.CanQuery = false; ring.CanTouch = false; ring.CastShadow = false
+		ring.Parent = lsFolder
+		local maxSize = lsSize:Get() / 10
+		local tween = LsTweenService:Create(ring, TweenInfo.new(0.55, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+			Size = Vector3.new(0.05, maxSize, maxSize),
+			Transparency = 1,
+		})
+		tween:Play()
+		tween.Completed:Connect(function() ring:Destroy() end)
+	end
+
+	local lsChar: Model? = nil
+	local lsHum: Humanoid? = nil
+	local lsConn: RBXScriptConnection? = nil
+	local lsWasFalling = false
+
+	local rsLs = RunService.Heartbeat:Connect(function()
+		local char = getCharacter()
+		if not lsEnabled:Get() then return end
+		if char ~= lsChar then
+			lsChar = char
+			if lsConn then lsConn:Disconnect(); lsConn = nil end
+			lsHum = char and char:FindFirstChildOfClass("Humanoid")
+			lsWasFalling = false
+			if lsHum then
+				local hum = lsHum :: Humanoid
+				lsConn = hum.StateChanged:Connect(function(_, new)
+					if new == Enum.HumanoidStateType.Freefall then
+						lsWasFalling = true
+					elseif new == Enum.HumanoidStateType.Landed and lsWasFalling then
+						lsWasFalling = false
+						local root = getRootPart()
+						if root and lsEnabled:Get() then
+							spawnLandingRing(root.Position)
+						end
+					elseif new ~= Enum.HumanoidStateType.Freefall then
+						lsWasFalling = false
+					end
+				end)
+			end
+		end
+	end)
+	table.insert(cleanups, function()
+		rsLs:Disconnect()
+		if lsConn then lsConn:Disconnect() end
+	end)
+
+	CFG.toggles.ls_enabled = lsEnabled
+	CFG.sliders.ls_size = lsSize
+	CFG.colors.ls_color = lsColor
 end
 
 ----------------------------------------------------------------------------------
@@ -14478,6 +15751,166 @@ do
 	end)
 
 	CFG.toggles.msa_enabled = msaEnabled
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5z3: Ambient Vignette
+----------------------------------------------------------------------------------
+do
+	-- Distinct from HP Vignette Flash above (health-triggered, one-shot):
+	-- a persistent color tint. Roblox's UIGradient is linear-only (no radial
+	-- gradient), so a true edge-darkening vignette shape is approximated
+	-- with four edge frames, each gradient-faded toward the screen center,
+	-- rather than needing an image asset.
+	local avSec = newSection(pgPlayer, "Ambient Vignette")
+	local avEnabled = avSec:Toggle({ Name = "Enabled", Default = false, Flag = "av_enabled" })
+	local avColor = newColorpicker(avSec, { Name = "Color", Default = Color3.fromRGB(0, 0, 0), Alpha = 1, Flag = "av_color" })
+	local avSettings = settingsOf(avSec, avEnabled)
+	local avIntensity = avSettings:Slider({ Name = "Intensity", Min = 5, Max = 100, Step = 5, Default = 40, Suffix = "%", Flag = "av_intensity" })
+
+	local function makeEdge()
+		local f = Instance.new("Frame")
+		f.BorderSizePixel = 0
+		f.BackgroundColor3 = Color3.new(0, 0, 0)
+		f.Visible = false
+		local grad = Instance.new("UIGradient")
+		grad.Parent = f
+		f.Parent = screen
+		return f, grad
+	end
+	local topF, topG = makeEdge()
+	local botF, botG = makeEdge()
+	local leftF, leftG = makeEdge()
+	local rightF, rightG = makeEdge()
+
+	topF.Size = UDim2.new(1, 0, 0.22, 0); topF.Position = UDim2.new(0, 0, 0, 0)
+	topG.Rotation = 90
+	botF.Size = UDim2.new(1, 0, 0.22, 0); botF.Position = UDim2.new(0, 0, 1, 0); botF.AnchorPoint = Vector2.new(0, 1)
+	botG.Rotation = -90
+	leftF.Size = UDim2.new(0.16, 0, 1, 0); leftF.Position = UDim2.new(0, 0, 0, 0)
+	leftG.Rotation = 0
+	rightF.Size = UDim2.new(0.16, 0, 1, 0); rightF.Position = UDim2.new(1, 0, 0, 0); rightF.AnchorPoint = Vector2.new(1, 0)
+	rightG.Rotation = 180
+
+	table.insert(cleanups, function()
+		topF:Destroy(); botF:Destroy(); leftF:Destroy(); rightF:Destroy()
+	end)
+
+	local rsAv = RunService.Heartbeat:Connect(function()
+		local on = avEnabled:Get()
+		topF.Visible = on; botF.Visible = on; leftF.Visible = on; rightF.Visible = on
+		if not on then return end
+		local col = avColor:Get()
+		local intensity = avIntensity:Get() / 100
+		local edgePairs = { { topF, topG }, { botF, botG }, { leftF, leftG }, { rightF, rightG } }
+		for _, pair in ipairs(edgePairs) do
+			local f, g = pair[1], pair[2]
+			f.BackgroundColor3 = col
+			g.Transparency = NumberSequence.new({
+				NumberSequenceKeypoint.new(0, 1 - intensity),
+				NumberSequenceKeypoint.new(1, 1),
+			})
+		end
+	end)
+	table.insert(cleanups, function() rsAv:Disconnect() end)
+
+	CFG.toggles.av_enabled = avEnabled
+	CFG.sliders.av_intensity = avIntensity
+	CFG.colors.av_color = avColor
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5z4: Idle Sparkles
+----------------------------------------------------------------------------------
+do
+	local isSec = newSection(pgPlayer, "Idle Sparkles")
+	local isEnabled = isSec:Toggle({ Name = "Enabled", Default = false, Flag = "is_enabled" })
+	local isColor = newColorpicker(isSec, { Name = "Color", Default = Color3.fromRGB(255, 240, 180), Alpha = 1, Flag = "is_color" })
+	local isSettings = settingsOf(isSec, isEnabled)
+	local isDelay = isSettings:Slider({ Name = "Idle delay", Min = 1, Max = 20, Step = 1, Default = 3, Suffix = "ds", Flag = "is_delay" })
+	local isRate  = isSettings:Slider({ Name = "Rate", Min = 1, Max = 20, Step = 1, Default = 4, Flag = "is_rate" })
+
+	local isFolder = Instance.new("Folder")
+	isFolder.Name = "MisanthropyIdleSparkles"
+	isFolder.Parent = Workspace
+	table.insert(cleanups, function() if isFolder then isFolder:Destroy() end end)
+
+	local isPart = Instance.new("Part")
+	isPart.Name = "IdleSparkleSource"
+	isPart.Anchored = true; isPart.CanCollide = false; isPart.CanQuery = false; isPart.CanTouch = false; isPart.CastShadow = false
+	isPart.Transparency = 1; isPart.Size = Vector3.new(2, 4, 2)
+	isPart.Parent = isFolder
+
+	local isEmitter = Instance.new("ParticleEmitter")
+	isEmitter.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+	isEmitter.Enabled = false
+	isEmitter.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.15), NumberSequenceKeypoint.new(1, 0) })
+	isEmitter.Lifetime = NumberRange.new(0.6, 1.2)
+	isEmitter.Speed = NumberRange.new(0.2, 0.8)
+	isEmitter.SpreadAngle = Vector2.new(180, 180)
+	isEmitter.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.1), NumberSequenceKeypoint.new(1, 1) })
+	isEmitter.LightEmission = 1
+	isEmitter.Parent = isPart
+
+	local isStationary = 0
+	local isLastPos: Vector3? = nil
+	local rsIs = RunService.Heartbeat:Connect(function(dt: number)
+		local root = getRootPart()
+		if not isEnabled:Get() or not root then
+			isEmitter.Enabled = false
+			isStationary = 0; isLastPos = nil
+			return
+		end
+		local pos = root.Position
+		local moving = isLastPos and (pos - isLastPos).Magnitude > 0.03
+		isLastPos = pos
+		if moving then isStationary = 0 else isStationary += dt end
+		isPart.CFrame = CFrame.new(pos)
+		local delay = isDelay:Get() / 10
+		local active = isStationary >= delay
+		isEmitter.Enabled = active
+		if active then
+			isEmitter.Rate = isRate:Get()
+			isEmitter.Color = ColorSequence.new(isColor:Get())
+		end
+	end)
+	table.insert(cleanups, function() rsIs:Disconnect() end)
+
+	CFG.toggles.is_enabled = isEnabled
+	CFG.sliders.is_delay = isDelay; CFG.sliders.is_rate = isRate
+	CFG.colors.is_color = isColor
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5z6: Camera Breathing
+----------------------------------------------------------------------------------
+do
+	local cmSec = newSection(pgPlayer, "Camera Breathing")
+	local cmEnabled = cmSec:Toggle({ Name = "Enabled", Default = false, Flag = "cm_enabled" })
+	local cmSettings = settingsOf(cmSec, cmEnabled)
+	local cmIntensity = cmSettings:Slider({ Name = "Intensity", Min = 1, Max = 20, Step = 1, Default = 4, Flag = "cm_intensity" })
+	local cmSpeed     = cmSettings:Slider({ Name = "Speed", Min = 5, Max = 100, Step = 5, Default = 25, Suffix = "%", Flag = "cm_speed" })
+
+	local cmBaseFov: number? = nil
+	local rsCm = RunService.RenderStepped:Connect(function()
+		local cam = Workspace.CurrentCamera
+		if not cmEnabled:Get() or not cam then
+			if cmBaseFov and cam then cam.FieldOfView = cmBaseFov end
+			cmBaseFov = nil
+			return
+		end
+		if not cmBaseFov then cmBaseFov = cam.FieldOfView end
+		local t = os.clock() * (cmSpeed:Get() / 100)
+		cam.FieldOfView = (cmBaseFov :: number) + math.sin(t) * (cmIntensity:Get() / 10)
+	end)
+	table.insert(cleanups, function()
+		rsCm:Disconnect()
+		local cam = Workspace.CurrentCamera
+		if cmBaseFov and cam then cam.FieldOfView = cmBaseFov end
+	end)
+
+	CFG.toggles.cm_enabled = cmEnabled
+	CFG.sliders.cm_intensity = cmIntensity; CFG.sliders.cm_speed = cmSpeed
 end
 
 ----------------------------------------------------------------------------------
