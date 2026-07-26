@@ -5029,6 +5029,7 @@ local pgWorld = Window:Page({ Name = "World FX", Columns = 2 })
 local pgPlayer = Window:Page({ Name = "Player", Columns = 2 })
 local pgConfigs = Window:Page({ Name = "Configs", Columns = 1 })
 local pgUtility = Window:Page({ Name = "Utility", Columns = 1 })
+local pgSpotify = Window:Page({ Name = "Spotify", Columns = 2 })
 
 local sectionSideCounts = {}
 local function newSection(page: any, name: string): any
@@ -9600,6 +9601,594 @@ do
 	end)
 
 	CFG.toggles.msa_enabled = msaEnabled
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5z3: Spotify
+----------------------------------------------------------------------------------
+-- Two hard limits worth knowing before touching this section:
+-- 1. Roblox has no API to capture system/app audio, so the visualizer below
+--    is NOT real FFT of what's actually playing - there is no way to get
+--    that from inside this sandbox, period. It's a stylized animation
+--    driven by is_playing plus, when available, the track's tempo/energy
+--    from Spotify's audio-features endpoint (which Spotify has restricted
+--    for a lot of newer developer apps - handled as an optional extra, not
+--    a requirement) with a randomized-but-organic fallback otherwise.
+-- 2. Lyrics come from a free public plain-text lookup (lyrics.ovh), not
+--    Spotify - the public Web API has no lyrics endpoint at all. This is
+--    full-text, not time-synced/karaoke-style.
+-- Auth is refresh-token based: this file can't do the initial OAuth login
+-- itself (no browser/redirect handling in a headless Lua script), so the
+-- user has to create a Spotify Developer app and do that one-time exchange
+-- themselves, then paste Client ID / Client Secret / Refresh Token in here.
+-- Those three get saved to misanthropy_assets/spotify.json (separate from
+-- the CFG.* slot system - see "Configs" below - since Textbox values were
+-- never part of that to begin with) and auto-loaded on future runs.
+do
+	local SP_TOKEN_URL = "https://accounts.spotify.com/api/token"
+	local SP_API = "https://api.spotify.com/v1"
+
+	-- forward declarations: UI callbacks below wire up to these before the
+	-- actual function bodies exist yet - Lua closures resolve a bare name
+	-- to whichever `local` of that name is already in scope at the point
+	-- the closure is *written*, so the `local` has to come first even
+	-- though the assignment comes later (the callbacks themselves only run
+	-- much later, by which point everything's been assigned).
+	local refreshSpotifyToken, ensureSpotifyToken, spotifyApi
+	local spPlay, spPause, spNext, spPrevious, spSetShuffle, spSetRepeat, spSetVolume
+	local pollSpotify, fetchAlbumArt, fetchLyrics, fetchAudioFeatures, onTrackChanged
+
+	-- Now-playing/auth state - declared before any UI so every closure in
+	-- this section (Playback buttons, the overlay's own buttons, the
+	-- network functions below) can all close over the same locals instead
+	-- of needing globals to dodge ordering.
+	local spAccessToken: string? = nil
+	local spTokenExpiresAt = 0
+	local spConnected = false
+	local npTrackId: string? = nil
+	local npName = ""
+	local npArtist = ""
+	local npDurationMs = 0
+	local npProgressMs = 0
+	local npProgressAt = 0
+	local npIsPlaying = false
+	local npShuffle = false
+	local npRepeat = "off"
+	local npArtUrl = ""
+	local npTempo = 120
+	local npEnergy = 0.6
+	local npHasAudioFeatures = false
+
+	local savedClientId, savedClientSecret, savedRefreshToken = "", "", ""
+	do
+		local raw = loadString("spotify.json")
+		if raw then
+			local ok, data = pcall(function() return HttpService:JSONDecode(raw) end)
+			if ok and type(data) == "table" then
+				savedClientId = data.clientId or ""
+				savedClientSecret = data.clientSecret or ""
+				savedRefreshToken = data.refreshToken or ""
+			end
+		end
+	end
+
+	local spSec = newSection(pgSpotify, "Connect")
+	local spClientId     = newTextInput(spSec, { Name = "Client ID", Default = savedClientId, Placeholder = "from your Spotify Developer app", Flag = "sp_client_id" })
+	local spClientSecret = newTextInput(spSec, { Name = "Client Secret", Default = savedClientSecret, Placeholder = "from your Spotify Developer app", Flag = "sp_client_secret" })
+	local spRefreshToken = newTextInput(spSec, { Name = "Refresh Token", Default = savedRefreshToken, Placeholder = "obtained via one-time OAuth login", Flag = "sp_refresh_token" })
+	local spStatusLabel = spSec:Label("Status: not connected")
+	spSec:Button({ Name = "Save & Connect", Callback = function()
+		local data = { clientId = spClientId:Get(), clientSecret = spClientSecret:Get(), refreshToken = spRefreshToken:Get() }
+		local ok, json = pcall(function() return HttpService:JSONEncode(data) end)
+		if ok then saveString("spotify.json", json) end
+		if not _req then
+			spStatusLabel:SetText("Status: this executor has no advanced HTTP request API")
+			return
+		end
+		spStatusLabel:SetText("Status: connecting...")
+		task.spawn(function()
+			if refreshSpotifyToken() then
+				spStatusLabel:SetText("Status: connected")
+				pcall(pollSpotify)
+			else
+				spStatusLabel:SetText("Status: connect failed - check credentials")
+			end
+		end)
+	end })
+
+	local ovSec = newSection(pgSpotify, "Overlay")
+	local spEnabled = ovSec:Toggle({ Name = "Show overlay", Default = false, Flag = "sp_ov_enabled" })
+	local spAccentColor = newColorpicker(ovSec, { Name = "Accent color", Default = Color3.fromRGB(30, 185, 84), Alpha = 1, Flag = "sp_accent" })
+	local ovSettings = settingsOf(ovSec, spEnabled)
+	local spCorner = ovSettings:Dropdown({ Name = "Corner", Items = { "Top Left", "Top Right", "Bottom Left", "Bottom Right" }, Default = "Bottom Right", Flag = "sp_corner" })
+	local spWidth = ovSettings:Slider({ Name = "Width", Min = 220, Max = 480, Step = 10, Default = 300, Suffix = "px", Flag = "sp_width" })
+	local spDrag = ovSettings:Toggle({ Name = "Draggable", Default = false, Flag = "sp_drag" })
+	local spShowViz = ovSettings:Toggle({ Name = "Show visualizer", Default = true, Flag = "sp_showviz" })
+	local spShowLyrics = ovSettings:Toggle({ Name = "Show lyrics", Default = false, Flag = "sp_showlyrics" })
+	local spOpacity = ovSettings:Slider({ Name = "Opacity", Min = 20, Max = 100, Step = 5, Default = 92, Suffix = "%", Flag = "sp_opacity" })
+
+	local ctrlSec = newSection(pgSpotify, "Playback")
+	ctrlSec:Button({ Name = "Previous", Callback = function() spPrevious() end })
+	ctrlSec:Button({ Name = "Play / Pause", Callback = function() if npIsPlaying then spPause() else spPlay() end end })
+	ctrlSec:Button({ Name = "Next", Callback = function() spNext() end })
+	ctrlSec:Button({ Name = "Toggle shuffle", Callback = function() spSetShuffle(not npShuffle) end })
+	ctrlSec:Button({ Name = "Cycle repeat", Callback = function()
+		local order = { "off", "context", "track" }
+		local idx = table.find(order, npRepeat) or 1
+		spSetRepeat(order[(idx % #order) + 1])
+	end })
+	local spVolSlider = ctrlSec:Slider({ Name = "Volume", Min = 0, Max = 100, Step = 5, Default = 50, Suffix = "%", Flag = "sp_volume_set",
+		Callback = function(v) spSetVolume(v) end })
+
+	-- Boxy, chudvision-styled persistent overlay - own ScreenGui-parented
+	-- Frame (not part of the chudvision Window), same dark/outline palette
+	-- (#4B4B4B outline, #161616/#202020 fill) as the rest of the UI.
+	local spHolder = Instance.new("Frame")
+	spHolder.Name = "SpotifyOverlay"
+	spHolder.BackgroundColor3 = Color3.fromRGB(22, 22, 22)
+	spHolder.BorderSizePixel = 0
+	spHolder.AutomaticSize = Enum.AutomaticSize.Y
+	spHolder.Size = UDim2.fromOffset(300, 0)
+	spHolder.Visible = false
+	spHolder.Parent = screen
+	local spStroke = Instance.new("UIStroke")
+	spStroke.Color = Color3.fromRGB(75, 75, 75)
+	spStroke.Thickness = 1
+	spStroke.Parent = spHolder
+	local spPad = Instance.new("UIPadding")
+	spPad.PaddingTop = UDim.new(0, 8); spPad.PaddingBottom = UDim.new(0, 8)
+	spPad.PaddingLeft = UDim.new(0, 8); spPad.PaddingRight = UDim.new(0, 8)
+	spPad.Parent = spHolder
+	local spList = Instance.new("UIListLayout")
+	spList.Padding = UDim.new(0, 6)
+	spList.SortOrder = Enum.SortOrder.LayoutOrder
+	spList.Parent = spHolder
+
+	local spTopRow = Instance.new("Frame")
+	spTopRow.BackgroundTransparency = 1
+	spTopRow.Size = UDim2.new(1, 0, 0, 64)
+	spTopRow.LayoutOrder = 1
+	spTopRow.Parent = spHolder
+	local spArtImage = Instance.new("ImageLabel")
+	spArtImage.BackgroundColor3 = Color3.fromRGB(32, 32, 32)
+	spArtImage.BorderSizePixel = 0
+	spArtImage.Size = UDim2.fromOffset(64, 64)
+	spArtImage.Image = ""
+	spArtImage.Parent = spTopRow
+	local spTextCol = Instance.new("Frame")
+	spTextCol.BackgroundTransparency = 1
+	spTextCol.Position = UDim2.fromOffset(72, 0)
+	spTextCol.Size = UDim2.new(1, -72, 1, 0)
+	spTextCol.Parent = spTopRow
+	local spTitleLabel = Instance.new("TextLabel")
+	spTitleLabel.BackgroundTransparency = 1
+	spTitleLabel.Size = UDim2.new(1, 0, 0, 18)
+	spTitleLabel.Font = Enum.Font.GothamBold
+	spTitleLabel.TextSize = 14
+	spTitleLabel.TextColor3 = Color3.new(1, 1, 1)
+	spTitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+	spTitleLabel.TextTruncate = Enum.TextTruncate.AtEnd
+	spTitleLabel.Text = "Not connected"
+	spTitleLabel.Parent = spTextCol
+	local spArtistLabel = Instance.new("TextLabel")
+	spArtistLabel.BackgroundTransparency = 1
+	spArtistLabel.Position = UDim2.fromOffset(0, 20)
+	spArtistLabel.Size = UDim2.new(1, 0, 0, 16)
+	spArtistLabel.Font = Enum.Font.Gotham
+	spArtistLabel.TextSize = 12
+	spArtistLabel.TextColor3 = Color3.fromRGB(180, 180, 180)
+	spArtistLabel.TextXAlignment = Enum.TextXAlignment.Left
+	spArtistLabel.TextTruncate = Enum.TextTruncate.AtEnd
+	spArtistLabel.Text = "Fill in Client ID/Secret/Refresh Token"
+	spArtistLabel.Parent = spTextCol
+
+	local spProgOuter = Instance.new("Frame")
+	spProgOuter.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+	spProgOuter.BorderSizePixel = 0
+	spProgOuter.Size = UDim2.new(1, 0, 0, 4)
+	spProgOuter.LayoutOrder = 2
+	spProgOuter.Parent = spHolder
+	local spProgFill = Instance.new("Frame")
+	spProgFill.BackgroundColor3 = Color3.fromRGB(30, 185, 84)
+	spProgFill.BorderSizePixel = 0
+	spProgFill.Size = UDim2.fromScale(0, 1)
+	spProgFill.Parent = spProgOuter
+	local spTimeLabel = Instance.new("TextLabel")
+	spTimeLabel.BackgroundTransparency = 1
+	spTimeLabel.Size = UDim2.new(1, 0, 0, 14)
+	spTimeLabel.Font = Enum.Font.Code
+	spTimeLabel.TextSize = 11
+	spTimeLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
+	spTimeLabel.TextXAlignment = Enum.TextXAlignment.Left
+	spTimeLabel.LayoutOrder = 3
+	spTimeLabel.Text = "0:00 / 0:00"
+	spTimeLabel.Parent = spHolder
+
+	local spCtrlRow = Instance.new("Frame")
+	spCtrlRow.BackgroundTransparency = 1
+	spCtrlRow.Size = UDim2.new(1, 0, 0, 22)
+	spCtrlRow.LayoutOrder = 4
+	spCtrlRow.Parent = spHolder
+	local spCtrlList = Instance.new("UIListLayout")
+	spCtrlList.FillDirection = Enum.FillDirection.Horizontal
+	spCtrlList.Padding = UDim.new(0, 4)
+	spCtrlList.Parent = spCtrlRow
+
+	local function makeOverlayButton(text: string, order: number, onClick: () -> ()): TextButton
+		local b = Instance.new("TextButton")
+		b.BackgroundColor3 = Color3.fromRGB(32, 32, 32)
+		b.BorderSizePixel = 0
+		b.AutoButtonColor = false
+		b.Size = UDim2.fromOffset(50, 22)
+		b.Font = Enum.Font.Gotham
+		b.TextSize = 11
+		b.TextColor3 = Color3.new(1, 1, 1)
+		b.Text = text
+		b.LayoutOrder = order
+		b.Parent = spCtrlRow
+		local stroke = Instance.new("UIStroke")
+		stroke.Color = Color3.fromRGB(60, 60, 60)
+		stroke.Parent = b
+		b.MouseButton1Click:Connect(onClick)
+		return b
+	end
+	makeOverlayButton("Prev", 1, function() spPrevious() end)
+	local spPlayBtn = makeOverlayButton("Play", 2, function() if npIsPlaying then spPause() else spPlay() end end)
+	makeOverlayButton("Next", 3, function() spNext() end)
+	local spShuffleBtn = makeOverlayButton("Shuf", 4, function() spSetShuffle(not npShuffle) end)
+	local spRepeatBtn = makeOverlayButton("Rep", 5, function()
+		local order = { "off", "context", "track" }
+		local idx = table.find(order, npRepeat) or 1
+		spSetRepeat(order[(idx % #order) + 1])
+	end)
+
+	local SP_BAR_COUNT = 24
+	local spVizRow = Instance.new("Frame")
+	spVizRow.BackgroundTransparency = 1
+	spVizRow.Size = UDim2.new(1, 0, 0, 36)
+	spVizRow.LayoutOrder = 5
+	spVizRow.Parent = spHolder
+	local spVizList = Instance.new("UIListLayout")
+	spVizList.FillDirection = Enum.FillDirection.Horizontal
+	spVizList.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	spVizList.VerticalAlignment = Enum.VerticalAlignment.Bottom
+	spVizList.Padding = UDim.new(0, 2)
+	spVizList.Parent = spVizRow
+	local spBars: { Frame } = {}
+	local spBarPhase: { number } = {}
+	for i = 1, SP_BAR_COUNT do
+		local bar = Instance.new("Frame")
+		bar.BackgroundColor3 = Color3.fromRGB(30, 185, 84)
+		bar.BorderSizePixel = 0
+		bar.AnchorPoint = Vector2.new(0.5, 1)
+		bar.Size = UDim2.fromOffset(6, 4)
+		bar.LayoutOrder = i
+		bar.Parent = spVizRow
+		table.insert(spBars, bar)
+		spBarPhase[i] = (i * 2.399963) % (math.pi * 2)
+	end
+
+	local spLyricsFrame = Instance.new("ScrollingFrame")
+	spLyricsFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+	spLyricsFrame.BorderSizePixel = 0
+	spLyricsFrame.Size = UDim2.new(1, 0, 0, 120)
+	spLyricsFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+	spLyricsFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	spLyricsFrame.ScrollBarThickness = 4
+	spLyricsFrame.Visible = false
+	spLyricsFrame.LayoutOrder = 6
+	spLyricsFrame.Parent = spHolder
+	local spLyricsText = Instance.new("TextLabel")
+	spLyricsText.BackgroundTransparency = 1
+	spLyricsText.Size = UDim2.new(1, -4, 0, 0)
+	spLyricsText.AutomaticSize = Enum.AutomaticSize.Y
+	spLyricsText.Font = Enum.Font.Gotham
+	spLyricsText.TextSize = 12
+	spLyricsText.TextColor3 = Color3.fromRGB(210, 210, 210)
+	spLyricsText.TextWrapped = true
+	spLyricsText.TextXAlignment = Enum.TextXAlignment.Left
+	spLyricsText.TextYAlignment = Enum.TextYAlignment.Top
+	spLyricsText.Text = ""
+	spLyricsText.Parent = spLyricsFrame
+
+	local SP_CORNER_ANCHOR = {
+		["Top Left"] = { anchor = Vector2.new(0, 0), pos = function() return UDim2.fromOffset(16, 16) end },
+		["Top Right"] = { anchor = Vector2.new(1, 0), pos = function() local vp = Workspace.CurrentCamera.ViewportSize; return UDim2.fromOffset(vp.X - 16, 16) end },
+		["Bottom Left"] = { anchor = Vector2.new(0, 1), pos = function() local vp = Workspace.CurrentCamera.ViewportSize; return UDim2.fromOffset(16, vp.Y - 16) end },
+		["Bottom Right"] = { anchor = Vector2.new(1, 1), pos = function() local vp = Workspace.CurrentCamera.ViewportSize; return UDim2.fromOffset(vp.X - 16, vp.Y - 16) end },
+	}
+	local spPosX, spPosY = 120, 120
+	do
+		local s = loadString("spotify_pos.txt")
+		if s then local x, y = string.match(s, "^(-?%d+),(-?%d+)$"); if x then spPosX = tonumber(x) :: number; spPosY = tonumber(y) :: number end end
+	end
+	do
+		local dragging, sx, sy, ox, oy = false, 0, 0, 0, 0
+		local c1 = spHolder.InputBegan:Connect(function(input)
+			if not spDrag:Get() then return end
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = true; sx = input.Position.X; sy = input.Position.Y; ox = spPosX; oy = spPosY
+			end
+		end)
+		local c2 = UserInputService.InputChanged:Connect(function(input)
+			if not dragging then return end
+			if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+				spPosX = ox + (input.Position.X - sx); spPosY = oy + (input.Position.Y - sy)
+			end
+		end)
+		local c3 = UserInputService.InputEnded:Connect(function(input)
+			if dragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+				dragging = false; saveString("spotify_pos.txt", string.format("%d,%d", spPosX, spPosY))
+			end
+		end)
+		table.insert(cleanups, function() c1:Disconnect(); c2:Disconnect(); c3:Disconnect() end)
+	end
+
+	-- ---- network layer (actual function bodies for the forward decls) ----
+
+	local function spotifyRawRequest(method: string, url: string, headers: { [string]: string }?, body: string?): (boolean, number, string?)
+		if not _req then return false, 0, nil end
+		local ok, res = pcall(_req, { Url = url, Method = method, Headers = headers or {}, Body = body })
+		if not ok or not res then return false, 0, nil end
+		return true, res.StatusCode or 0, res.Body
+	end
+
+	refreshSpotifyToken = function(): boolean
+		local clientId = spClientId:Get()
+		local clientSecret = spClientSecret:Get()
+		local refreshToken = spRefreshToken:Get()
+		if clientId == "" or clientSecret == "" or refreshToken == "" then
+			spConnected = false
+			spStatusLabel:SetText("Status: missing Client ID/Secret/Refresh Token")
+			return false
+		end
+		local body = "grant_type=refresh_token"
+			.. "&refresh_token=" .. HttpService:UrlEncode(refreshToken)
+			.. "&client_id=" .. HttpService:UrlEncode(clientId)
+			.. "&client_secret=" .. HttpService:UrlEncode(clientSecret)
+		local ok, status, respBody = spotifyRawRequest("POST", SP_TOKEN_URL, { ["Content-Type"] = "application/x-www-form-urlencoded" }, body)
+		if not ok or status ~= 200 or not respBody then
+			spConnected = false
+			spStatusLabel:SetText("Status: token refresh failed (" .. tostring(status) .. ")")
+			return false
+		end
+		local dok, data = pcall(function() return HttpService:JSONDecode(respBody) end)
+		if not dok or not data or not data.access_token then
+			spConnected = false
+			spStatusLabel:SetText("Status: bad token response")
+			return false
+		end
+		spAccessToken = data.access_token
+		spTokenExpiresAt = os.clock() + (tonumber(data.expires_in) or 3600) - 30
+		spConnected = true
+		return true
+	end
+
+	ensureSpotifyToken = function(): boolean
+		if spAccessToken and os.clock() < spTokenExpiresAt then return true end
+		return refreshSpotifyToken()
+	end
+
+	spotifyApi = function(method: string, path: string, body: any?): (boolean, number, any)
+		if not ensureSpotifyToken() then return false, 0, nil end
+		local jsonBody: string? = nil
+		if body ~= nil then
+			local eok, encoded = pcall(function() return HttpService:JSONEncode(body) end)
+			jsonBody = eok and encoded or nil
+		end
+		local headers = { ["Authorization"] = "Bearer " .. (spAccessToken :: string), ["Content-Type"] = "application/json" }
+		local ok, status, respBody = spotifyRawRequest(method, SP_API .. path, headers, jsonBody)
+		if ok and status == 401 then
+			spAccessToken = nil
+			if ensureSpotifyToken() then
+				headers["Authorization"] = "Bearer " .. (spAccessToken :: string)
+				ok, status, respBody = spotifyRawRequest(method, SP_API .. path, headers, jsonBody)
+			end
+		end
+		local data = nil
+		if respBody and respBody ~= "" then
+			local dok, decoded = pcall(function() return HttpService:JSONDecode(respBody) end)
+			if dok then data = decoded end
+		end
+		return ok and status < 300, status, data
+	end
+
+	spPlay = function() spotifyApi("PUT", "/me/player/play") end
+	spPause = function() spotifyApi("PUT", "/me/player/pause") end
+	spNext = function() spotifyApi("POST", "/me/player/next") end
+	spPrevious = function() spotifyApi("POST", "/me/player/previous") end
+	spSetShuffle = function(v: boolean) spotifyApi("PUT", "/me/player/shuffle?state=" .. tostring(v)) end
+	spSetRepeat = function(mode: string) spotifyApi("PUT", "/me/player/repeat?state=" .. mode) end
+	spSetVolume = function(pct: number) spotifyApi("PUT", "/me/player/volume?volume_percent=" .. math.floor(pct)) end
+
+	local spLyricsCache: { [string]: string } = {}
+	fetchLyrics = function(artist: string, title: string)
+		task.spawn(function()
+			local key = artist .. "|" .. title
+			if spLyricsCache[key] then
+				spLyricsText.Text = spLyricsCache[key]
+				return
+			end
+			spLyricsText.Text = "Loading lyrics..."
+			local url = "https://api.lyrics.ovh/v1/" .. HttpService:UrlEncode(artist) .. "/" .. HttpService:UrlEncode(title)
+			local body = httpGetBinary(url)
+			local text = "Lyrics not found."
+			if body then
+				local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+				if ok and data and type(data.lyrics) == "string" and data.lyrics ~= "" then
+					text = data.lyrics
+				end
+			end
+			spLyricsCache[key] = text
+			if npName == title and npArtist == artist then
+				spLyricsText.Text = text
+			end
+		end)
+	end
+
+	fetchAlbumArt = function(url: string)
+		if not CAN_DL or url == "" then return end
+		task.spawn(function()
+			local hash = 0
+			for i = 1, #url do hash = (hash * 33 + string.byte(url, i)) % 2147483647 end
+			local path = ROOT .. "/images/spotify_art_" .. hash .. ".jpg"
+			if not _isfile(path) then
+				local data = httpGetBinary(url)
+				if not data then return end
+				ensureDir(ROOT .. "/images")
+				if not pcall(_writefile, path, data) then return end
+			end
+			local ok, id = pcall(_getasset, path)
+			if ok and id and npArtUrl == url then
+				spArtImage.Image = id
+			end
+		end)
+	end
+
+	fetchAudioFeatures = function(trackId: string)
+		task.spawn(function()
+			local ok, _status, data = spotifyApi("GET", "/audio-features/" .. trackId)
+			if ok and data and type(data.tempo) == "number" and data.tempo > 0 then
+				npTempo = data.tempo
+				npEnergy = tonumber(data.energy) or 0.6
+				npHasAudioFeatures = true
+			else
+				npHasAudioFeatures = false
+			end
+		end)
+	end
+
+	onTrackChanged = function()
+		fetchAlbumArt(npArtUrl)
+		fetchLyrics(npArtist, npName)
+		if npTrackId then fetchAudioFeatures(npTrackId) end
+	end
+
+	pollSpotify = function()
+		local ok, status, data = spotifyApi("GET", "/me/player")
+		if not ok then return end
+		spConnected = true
+		if status == 204 or not data then
+			npIsPlaying = false
+			return
+		end
+		local item = data.item
+		if item then
+			local newId = item.id
+			npName = item.name or ""
+			local artists = {}
+			for _, a in ipairs(item.artists or {}) do table.insert(artists, a.name) end
+			npArtist = table.concat(artists, ", ")
+			npDurationMs = item.duration_ms or 0
+			local images = item.album and item.album.images
+			npArtUrl = (images and images[1] and images[1].url) or ""
+			if newId ~= npTrackId then
+				npTrackId = newId
+				onTrackChanged()
+			end
+		end
+		npProgressMs = data.progress_ms or 0
+		npProgressAt = os.clock()
+		npIsPlaying = data.is_playing == true
+		npShuffle = data.shuffle_state == true
+		npRepeat = data.repeat_state or "off"
+	end
+
+	local rsSpUpdate = RunService.RenderStepped:Connect(function()
+		local on = spEnabled:Get()
+		spHolder.Visible = on
+		if not on then return end
+
+		spHolder.BackgroundTransparency = 1 - (spOpacity:Get() / 100)
+		spHolder.Size = UDim2.fromOffset(spWidth:Get(), 0)
+
+		if spDrag:Get() then
+			spHolder.AnchorPoint = Vector2.zero
+			spHolder.Position = UDim2.fromOffset(spPosX, spPosY)
+		else
+			local corner = SP_CORNER_ANCHOR[spCorner:Get()] or SP_CORNER_ANCHOR["Bottom Right"]
+			spHolder.AnchorPoint = corner.anchor
+			spHolder.Position = corner.pos()
+		end
+
+		local accent = spAccentColor:Get()
+		spProgFill.BackgroundColor3 = accent
+		for _, bar in ipairs(spBars) do bar.BackgroundColor3 = accent end
+
+		if spConnected then
+			spTitleLabel.Text = npName ~= "" and npName or "Not playing"
+			spArtistLabel.Text = npArtist
+		else
+			spTitleLabel.Text = "Not connected"
+			spArtistLabel.Text = "Fill in Client ID/Secret/Refresh Token"
+		end
+
+		local liveProgress = npProgressMs
+		if npIsPlaying then
+			liveProgress = npProgressMs + (os.clock() - npProgressAt) * 1000
+		end
+		liveProgress = math.clamp(liveProgress, 0, math.max(npDurationMs, 1))
+		local frac = npDurationMs > 0 and (liveProgress / npDurationMs) or 0
+		spProgFill.Size = UDim2.fromScale(frac, 1)
+		spTimeLabel.Text = string.format("%d:%02d / %d:%02d",
+			math.floor(liveProgress / 60000), math.floor(liveProgress / 1000) % 60,
+			math.floor(npDurationMs / 60000), math.floor(npDurationMs / 1000) % 60)
+
+		spPlayBtn.Text = npIsPlaying and "Pause" or "Play"
+		spShuffleBtn.BackgroundColor3 = npShuffle and accent or Color3.fromRGB(32, 32, 32)
+		spRepeatBtn.BackgroundColor3 = (npRepeat ~= "off") and accent or Color3.fromRGB(32, 32, 32)
+
+		spVizRow.Visible = spShowViz:Get()
+		if spShowViz:Get() then
+			local clock = os.clock()
+			local bpm = npHasAudioFeatures and npTempo or 120
+			local beatHz = bpm / 60
+			local energy = npHasAudioFeatures and npEnergy or 0.5
+			for i, bar in ipairs(spBars) do
+				local h
+				if npIsPlaying then
+					local wave = math.sin(clock * beatHz * math.pi * 2 + spBarPhase[i]) * 0.5 + 0.5
+					local jitter = math.sin(clock * (3 + i * 0.37) + spBarPhase[i] * 2) * 0.5 + 0.5
+					h = 4 + (wave * 0.6 + jitter * 0.4) * (18 + energy * 14)
+				else
+					h = 4 + math.sin(clock * 0.6 + spBarPhase[i]) * 1.5
+				end
+				bar.Size = UDim2.fromOffset(6, math.max(2, h))
+			end
+		end
+
+		spLyricsFrame.Visible = spShowLyrics:Get()
+	end)
+	table.insert(cleanups, function() rsSpUpdate:Disconnect() end)
+
+	local spPolling = true
+	task.spawn(function()
+		while spPolling do
+			if spEnabled:Get() and _req then
+				pcall(pollSpotify)
+			end
+			task.wait(1.5)
+		end
+	end)
+	table.insert(cleanups, function()
+		spPolling = false
+		if spHolder then spHolder:Destroy() end
+	end)
+
+	if savedClientId ~= "" and savedClientSecret ~= "" and savedRefreshToken ~= "" and _req then
+		task.spawn(function()
+			if refreshSpotifyToken() then
+				spStatusLabel:SetText("Status: connected")
+				pcall(pollSpotify)
+			end
+		end)
+	end
+
+	CFG.toggles.sp_ov_enabled = spEnabled; CFG.toggles.sp_drag = spDrag
+	CFG.toggles.sp_showviz = spShowViz; CFG.toggles.sp_showlyrics = spShowLyrics
+	CFG.sliders.sp_width = spWidth; CFG.sliders.sp_opacity = spOpacity; CFG.sliders.sp_volume_set = spVolSlider
+	CFG.dropdowns.sp_corner = spCorner
+	CFG.colors.sp_accent = spAccentColor
 end
 
 ----------------------------------------------------------------------------------
