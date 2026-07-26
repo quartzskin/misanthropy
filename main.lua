@@ -14357,6 +14357,65 @@ do
 end
 
 ----------------------------------------------------------------------------------
+-- SECTION 6b: Watermark
+----------------------------------------------------------------------------------
+do
+	-- This is the vendored library's own Library:Watermark() widget - like
+	-- SpotifyPlayer, it's a standalone opt-in constructor nothing else in the
+	-- library calls automatically. It's a draggable shimmer-text tag with a
+	-- built-in FPS counter and an optional custom text callback
+	-- (:SetDynamicTextProvider). Its DEFAULT behavior (no provider set) formats
+	-- a stats string with os.date(...), which is unavailable in this Luau
+	-- sandbox (see the Roblox/Luau gotchas section below) - so this always
+	-- keeps a DynamicTextProvider installed and never calls :SetText() again
+	-- after setup (:SetText() clears the provider, which would re-enable that
+	-- broken os.date path on the next stats tick). All customization here
+	-- reads live :Get() values from inside the provider callback instead.
+	local wmSec = newSection(pgConfigs, "Watermark")
+	local watermark = Library:Watermark({ Name = "misanthropy.lua" })
+
+	local wmEnabled = wmSec:Toggle({
+		Name = "Show watermark",
+		Default = true,
+		Flag = "wm_enabled",
+		Callback = function(v: boolean)
+			pcall(function() watermark:SetVisibility(v) end)
+		end,
+	})
+
+	local wmSettings = settingsOf(wmSec, wmEnabled)
+	local wmText = newTextInput(wmSettings, {
+		Name = "Watermark text",
+		Default = "misanthropy.lua",
+		Placeholder = "misanthropy.lua",
+		Flag = "wm_text",
+	})
+	local wmShowFps = wmSettings:Toggle({ Name = "Show FPS", Default = false, Flag = "wm_fps" })
+
+	pcall(function()
+		watermark:SetDynamicTextProvider(function(fps: number)
+			local text = wmText:Get()
+			if type(text) ~= "string" or text == "" then
+				text = "misanthropy.lua"
+			end
+			if wmShowFps:Get() then
+				return text .. " / " .. tostring(fps) .. "fps"
+			end
+			return text
+		end)
+	end)
+
+	-- Same limitation as SpotifyPlayer: no Destroy()/GetInstance() exposed,
+	-- so hiding it is the best available cleanup.
+	table.insert(cleanups, function()
+		pcall(function() watermark:SetVisibility(false) end)
+	end)
+
+	CFG.toggles.wm_enabled = wmEnabled
+	CFG.toggles.wm_fps = wmShowFps
+end
+
+----------------------------------------------------------------------------------
 -- LOAD SPLASH
 ----------------------------------------------------------------------------------
 do
