@@ -6578,64 +6578,6 @@ do
 		table.clear(savedMat); table.clear(savedColor); table.clear(savedTrans)
 	end
 
-	-- Some gear/backpack/attachment mesh parts in this game aren't parented
-	-- under the Character model at all - they're welded on (Weld/Motor6D/
-	-- WeldConstraint) from elsewhere in Workspace, so a plain
-	-- char:GetDescendants() BasePart scan misses them. This walks the
-	-- character, and for every joint it finds, follows Part0/Part1 to
-	-- whatever it's connected to (wherever that part actually lives) and
-	-- recurses into it too, so chained attachments (e.g. something welded
-	-- to a welded backpack) are covered.
-	local function collectAttachedParts(char: Model): { BasePart }
-		local seen: { [BasePart]: boolean } = {}
-		local result: { BasePart } = {}
-		local function visit(inst: Instance)
-			for _, d in ipairs(inst:GetDescendants()) do
-				if d:IsA("BasePart") then
-					if not seen[d] then
-						seen[d] = true
-						if d.Name ~= "HumanoidRootPart" then
-							table.insert(result, d)
-						end
-					end
-				elseif d:IsA("Weld") or d:IsA("Motor6D") or d:IsA("WeldConstraint") then
-					local joint = d :: Weld | Motor6D | WeldConstraint
-					local p0, p1 = (joint :: any).Part0, (joint :: any).Part1
-					for _, other in ipairs({ p0, p1 }) do
-						if other and other:IsA("BasePart") and not seen[other] then
-							seen[other] = true
-							if other.Name ~= "HumanoidRootPart" then
-								table.insert(result, other)
-							end
-							visit(other)
-						end
-					end
-				end
-			end
-		end
-		visit(char)
-		return result
-	end
-
-	local msAttachedParts: { BasePart } = {}
-	local msAttachedChar: Model? = nil
-	local msAttachedAcc = 0
-	local MS_ATTACHED_REFRESH = 0.5
-
-	local function refreshAttachedParts(char: Model, dt: number)
-		if char ~= msAttachedChar then
-			msAttachedChar = char
-			msAttachedParts = collectAttachedParts(char)
-			msAttachedAcc = 0
-			return
-		end
-		msAttachedAcc += dt
-		if msAttachedAcc >= MS_ATTACHED_REFRESH then
-			msAttachedAcc = 0
-			msAttachedParts = collectAttachedParts(char)
-		end
-	end
-
 	local msHideReal  = msSec:Toggle({ Name = "Hide my real body", Default = false, Flag = "ms_hidereal" })
 
 	local msOverlayOn = msSec:Toggle({ Name = "Mesh overlay", Default = false, Flag = "ms_overlay_on" })
@@ -6649,6 +6591,10 @@ do
 	local msPitch     = msOvSettings:Slider({ Name = "Pitch", Min = 0, Max = 360, Step = 5, Default = 0, Suffix = "°", Flag = "ms_pitch" })
 	local msYaw       = msOvSettings:Slider({ Name = "Yaw", Min = 0, Max = 360, Step = 5, Default = 0, Suffix = "°", Flag = "ms_yaw" })
 	local msRoll      = msOvSettings:Slider({ Name = "Roll", Min = 0, Max = 360, Step = 5, Default = 0, Suffix = "°", Flag = "ms_roll" })
+	local msSpinOn    = msOvSettings:Toggle({ Name = "Spin", Default = false, Flag = "ms_spin_on" })
+	local msSpinSettings = settingsOf(msSec, msSpinOn)
+	local msSpinAxis  = msSpinSettings:Dropdown({ Name = "Spin axis", Items = { "Yaw", "Pitch", "Roll" }, Default = "Yaw", Flag = "ms_spin_axis" })
+	local msSpinSpeed = msSpinSettings:Slider({ Name = "Spin speed", Min = 5, Max = 400, Step = 5, Default = 100, Suffix = "%", Flag = "ms_spin_speed" })
 	local msTexId     = newTextInput(msOvSettings, { Name = "Texture ID (optional)", Default = "", Placeholder = "rbxassetid or number", Flag = "ms_texid" })
 	local msModelId   = newTextInput(msOvSettings, { Name = "Model asset ID (Full Model mode)", Default = "", Placeholder = "rbxassetid or number, must be uploaded to Roblox", Flag = "ms_modelid" })
 
@@ -6779,33 +6725,9 @@ do
 	end
 	msOvSettings:Button({ Name = "Load model", Callback = loadModelOverlay })
 
-	-- Bound to RenderStepped via BindToRenderStep at a priority AFTER
-	-- Character (instead of a plain RunService.RenderStepped:Connect) so
-	-- this runs strictly after Roblox's own camera/character modules for
-	-- the frame. Those reset LocalTransparencyModifier on their own
-	-- (the built-in "fade character out when the camera gets close" system),
-	-- and a plain :Connect() has no guaranteed ordering against that - it
-	-- was losing the fight most frames, which is why "Hide my real body"
-	-- wasn't reliably hiding anything.
-	local MS_RENDER_NAME = "MisanthropyModelSkinRender"
-	-- BindToRenderStep throws if this name is already bound (unlike
-	-- RunService.Event:Connect, which just adds another connection). Since
-	-- nothing in this file automatically re-runs a previous execution's
-	-- cleanups() list, re-running the whole script in the same session
-	-- (without a full rejoin) would still have the OLD run's binding
-	-- registered under this exact name and error out here, silently
-	-- halting every section defined after this one (Vault Sorter, Movement,
-	-- Position Visualizer, Configs, the splash screen - all of it). Evict
-	-- any stale binding first; unbinding a name that isn't bound is a safe
-	-- no-op, so this is harmless on a normal first run too.
-	pcall(function() RunService:UnbindFromRenderStep(MS_RENDER_NAME) end)
-	RunService:BindToRenderStep(MS_RENDER_NAME, Enum.RenderPriority.Character.Value + 1, function(dt: number)
+	local rs10 = RunService.RenderStepped:Connect(function()
 		local char = getCharacter()
 		local root = char and (char:FindFirstChild("HumanoidRootPart") :: BasePart?)
-
-		if char then
-			refreshAttachedParts(char, dt)
-		end
 
 		if msMatEnabled:Get() and char then
 			local matName = msMaterial:Get()
@@ -6813,8 +6735,8 @@ do
 			local tintOn = msTint:Get()
 			local col = msMatColor:Get()
 			local bodyTrans = msBodyTrans:Get() / 100
-			for _, d in ipairs(msAttachedParts) do
-				if d.Parent then
+			for _, d in ipairs(char:GetDescendants()) do
+				if d:IsA("BasePart") and d.Name ~= "HumanoidRootPart" then
 					if savedMat[d] == nil then
 						savedMat[d] = d.Material
 						savedColor[d] = d.Color
@@ -6834,8 +6756,8 @@ do
 		end
 
 		if msHideReal:Get() and char then
-			for _, d in ipairs(msAttachedParts) do
-				if d.Parent then
+			for _, d in ipairs(char:GetDescendants()) do
+				if d:IsA("BasePart") and d.Name ~= "HumanoidRootPart" then
 					if savedTrans[d] == nil then savedTrans[d] = d.LocalTransparencyModifier end
 					d.LocalTransparencyModifier = 1
 				end
@@ -6859,9 +6781,17 @@ do
 			local pitch = math.rad(msPitch:Get())
 			local yaw = math.rad(msYaw:Get())
 			local roll = math.rad(msRoll:Get())
-			-- rotation is always root.CFrame (your actual current orientation)
-			-- plus these fixed offsets - no independent animated spin added on
-			-- top, so the overlay only ever turns because you turned.
+			if msSpinOn:Get() then
+				local spin = (os.clock() * (msSpinSpeed:Get() / 100) * 2) % (2 * math.pi)
+				local axis = msSpinAxis:Get()
+				if axis == "Pitch" then
+					pitch += spin
+				elseif axis == "Roll" then
+					roll += spin
+				else
+					yaw += spin
+				end
+			end
 			local targetCFrame = root.CFrame * CFrame.new(xoff, yoff, zoff) * CFrame.Angles(pitch, yaw, roll)
 
 			if useModel then
@@ -6888,16 +6818,19 @@ do
 		end
 	end)
 	table.insert(cleanups, function()
-		RunService:UnbindFromRenderStep(MS_RENDER_NAME)
+		rs10:Disconnect()
 		restoreMaterial()
 	end)
 
 	CFG.toggles.ms_mat_enabled = msMatEnabled; CFG.toggles.ms_tint = msTint
 	CFG.toggles.ms_overlay_on = msOverlayOn; CFG.toggles.ms_hidereal = msHideReal
+	CFG.toggles.ms_spin_on = msSpinOn
 	CFG.sliders.ms_bodytrans = msBodyTrans; CFG.sliders.ms_scale = msScale
 	CFG.sliders.ms_xoff = msXOff; CFG.sliders.ms_yoff = msYOff; CFG.sliders.ms_zoff = msZOff
 	CFG.sliders.ms_pitch = msPitch; CFG.sliders.ms_yaw = msYaw; CFG.sliders.ms_roll = msRoll
+	CFG.sliders.ms_spin_speed = msSpinSpeed
 	CFG.dropdowns.ms_material = msMaterial; CFG.dropdowns.ms_overlay_type = msOverlayType
+	CFG.dropdowns.ms_spin_axis = msSpinAxis
 	CFG.colors.ms_matcolor = msMatColor
 end
 
@@ -9667,81 +9600,6 @@ do
 	end)
 
 	CFG.toggles.msa_enabled = msaEnabled
-end
-
-----------------------------------------------------------------------------------
--- SECTION 5z2: Position Visualizer
-----------------------------------------------------------------------------------
-do
-	local pvSec = newSection(pgUtility, "Position Visualizer")
-	local pvEnabled = pvSec:Toggle({ Name = "Enabled", Default = false, Flag = "pv_enabled" })
-	local pvSettings = settingsOf(pvSec, pvEnabled)
-	local pvShowText = pvSettings:Toggle({ Name = "Show coordinates", Default = true, Flag = "pv_showtext" })
-	local pvSize = pvSettings:Slider({ Name = "Marker size", Min = 20, Max = 200, Step = 5, Default = 60, Suffix = "%", Flag = "pv_size" })
-	local pvColor = newColorpicker(pvSettings, { Name = "Marker color", Default = Color3.fromRGB(80, 220, 120), Alpha = 1, Flag = "pv_color" })
-
-	local pvFolder = Instance.new("Folder")
-	pvFolder.Name = "MisanthropyPositionVisualizer"
-	pvFolder.Parent = Workspace
-	table.insert(cleanups, function() if pvFolder then pvFolder:Destroy() end end)
-
-	local pvMarker = Instance.new("Part")
-	pvMarker.Name = "PositionMarker"
-	pvMarker.Shape = Enum.PartType.Ball
-	pvMarker.Material = Enum.Material.Neon
-	pvMarker.Anchored = true
-	pvMarker.CanCollide = false; pvMarker.CanQuery = false; pvMarker.CanTouch = false; pvMarker.Massless = true
-	pvMarker.CastShadow = false
-	pvMarker.Size = Vector3.new(0.6, 0.6, 0.6)
-	pvMarker.Transparency = 1
-	pvMarker.Parent = pvFolder
-
-	local pvBillboard = Instance.new("BillboardGui")
-	pvBillboard.Name = "Coords"
-	pvBillboard.Size = UDim2.fromOffset(170, 36)
-	pvBillboard.StudsOffset = Vector3.new(0, 1.4, 0)
-	pvBillboard.AlwaysOnTop = true
-	pvBillboard.Enabled = false
-	pvBillboard.Parent = pvMarker
-
-	local pvText = Instance.new("TextLabel")
-	pvText.BackgroundTransparency = 1
-	pvText.Size = UDim2.fromScale(1, 1)
-	pvText.Font = Enum.Font.Code
-	pvText.TextSize = 14
-	pvText.TextColor3 = Color3.new(1, 1, 1)
-	pvText.TextStrokeTransparency = 0
-	pvText.Text = ""
-	pvText.Parent = pvBillboard
-
-	pvFolder.ChildRemoved:Connect(function()
-		task.defer(function()
-			if not pvMarker.Parent then pvMarker.Parent = pvFolder end
-		end)
-	end)
-
-	local rsPv = RunService.RenderStepped:Connect(function()
-		local root = getRootPart()
-		local on = pvEnabled:Get() and root ~= nil
-		pvMarker.Transparency = on and 0 or 1
-		pvBillboard.Enabled = on and pvShowText:Get()
-		if not on then return end
-
-		pvMarker.Color = pvColor:Get()
-		local s = pvSize:Get() / 100 * 0.6
-		pvMarker.Size = Vector3.new(s, s, s)
-		pvMarker.CFrame = CFrame.new(root.Position)
-
-		if pvShowText:Get() then
-			local p = root.Position
-			pvText.Text = string.format("X: %.1f  Y: %.1f  Z: %.1f", p.X, p.Y, p.Z)
-		end
-	end)
-	table.insert(cleanups, function() rsPv:Disconnect() end)
-
-	CFG.toggles.pv_enabled = pvEnabled; CFG.toggles.pv_showtext = pvShowText
-	CFG.sliders.pv_size = pvSize
-	CFG.colors.pv_color = pvColor
 end
 
 ----------------------------------------------------------------------------------
