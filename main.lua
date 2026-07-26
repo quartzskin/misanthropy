@@ -244,7 +244,7 @@ do
             ["Background"] = Color3.fromRGB(16, 17, 20),
             ["Outline"] = Color3.fromRGB(36, 38, 45),
             ["Border"] = Color3.fromRGB(7, 8, 10),
-            ["Accent"] = Color3.fromRGB(152, 188, 255),
+            ["Accent"] = Color3.fromRGB(255, 255, 255),
             ["Risky"] = Color3.fromRGB(255, 50, 50),
             ["Light Border"] = Color3.fromRGB(12, 8, 12),
             ["Border 2"] = Color3.fromRGB(5, 10, 14),
@@ -14249,6 +14249,68 @@ do
 	end)
 
 	CFG.toggles.msa_enabled = msaEnabled
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5z2: Spotify Player
+----------------------------------------------------------------------------------
+do
+	-- This is the vendored library's own SpotifyPlayer widget (Library.SpotifyPlayer,
+	-- defined inside the embed but never called by anything else in the library -
+	-- Library:Window doesn't build one automatically, it's a standalone opt-in
+	-- widget). It's a complete, working Spotify Web API client: real OAuth
+	-- refresh-token flow against accounts.spotify.com, real playback/search calls
+	-- against api.spotify.com, its own draggable floating frame (parented straight
+	-- to Library.Holder, not tied to any Page/Section), and its own token
+	-- persistence to niggahack/token.txt independent of misanthropy's CFG/config
+	-- system - Spotify:SetToken(...) writes there directly, and it's read back
+	-- automatically the next time this widget is constructed. This replaces
+	-- misanthropy's earlier hand-written Spotify integration (removed twice
+	-- earlier for an unresolved runtime bug) with the library's own
+	-- already-built implementation instead of writing another one from scratch.
+	local spSec = newSection(pgPlayer, "Spotify")
+	local spotify = Library:SpotifyPlayer()
+
+	local spShow = spSec:Toggle({
+		Name = "Show player",
+		Default = true,
+		Flag = "sp_show",
+		Callback = function(v: boolean)
+			pcall(function() spotify:SetVisibility(v) end)
+		end,
+	})
+
+	spSec:Label("Token (paste access token, or full JSON w/ refresh_token+client_id+client_secret for auto-refresh)")
+	local spTokenBox = spSec:Textbox({
+		Default = "",
+		Placeholder = "paste token, then Save",
+		Flag = "sp_token_input",
+	})
+	spSec:Button({ Name = "Save token", Callback = function()
+		local text = spTokenBox:Get()
+		if type(text) ~= "string" or text == "" then
+			notify("Spotify", "Paste a token first")
+			return
+		end
+		local ok = pcall(function() spotify:SetToken(text) end)
+		notify("Spotify", ok and "Token saved" or "Failed to save token")
+	end })
+	spSec:Button({ Name = "Refresh now", Callback = function()
+		pcall(function() spotify:Refresh() end)
+	end })
+
+	-- Spotify never exposes a Destroy()/GetInstance() on the object it returns
+	-- (only SetVisibility/Center/SetPosition/GetBounds/SetToken/Refresh), so the
+	-- best available cleanup is hiding it - there's no way to actually tear down
+	-- its Frame from outside the widget's own closure.
+	table.insert(cleanups, function()
+		pcall(function() spotify:SetVisibility(false) end)
+	end)
+
+	-- Deliberately not added to CFG: the widget already persists its own token to
+	-- niggahack/token.txt, and mirroring that secret into misanthropy's own JSON
+	-- config files would just be a second, redundant place for it to leak from.
+	CFG.toggles.sp_show = spShow
 end
 
 ----------------------------------------------------------------------------------
