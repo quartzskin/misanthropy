@@ -9652,6 +9652,20 @@ Library.Get = function(self)
 	return self.Value
 end
 
+-- Library.Holder (the embed's own ScreenGui, parented to gethui()/CoreGui) is
+-- created with no explicit DisplayOrder, defaulting to 0. That's a real
+-- problem here: this file's own "screen" ScreenGui (built further down, used
+-- for the splash screen / HP vignette flash / Image overlay) sits at
+-- DisplayOrder 9999, and nhack's own UI is a separate, unreadable-to-us
+-- ScreenGui that could be set to anything. Whichever of those actually ends
+-- up on top can also end up eating this window's clicks even while it's
+-- still visible underneath - Roblox delivers input to whatever's topmost by
+-- DisplayOrder, not by what looks visually on top to a human. Toggles/
+-- sliders rendering fine but never responding to clicks or drags is exactly
+-- what that looks like. Force this window's DisplayOrder to Int32's actual
+-- max so nothing in this file (or nhack) can ever end up above it again.
+Library.Holder.Instance.DisplayOrder = 2147483647
+
 -- Every feature below is hosted in its own window from the embedded UI
 -- library instead of nhack's Lua tab. nhack keeps a "misanthropy" tab
 -- (still under its own AddTab, since nhack owns the default Lua tab and
@@ -14249,68 +14263,6 @@ do
 	end)
 
 	CFG.toggles.msa_enabled = msaEnabled
-end
-
-----------------------------------------------------------------------------------
--- SECTION 5z2: Spotify Player
-----------------------------------------------------------------------------------
-do
-	-- This is the vendored library's own SpotifyPlayer widget (Library.SpotifyPlayer,
-	-- defined inside the embed but never called by anything else in the library -
-	-- Library:Window doesn't build one automatically, it's a standalone opt-in
-	-- widget). It's a complete, working Spotify Web API client: real OAuth
-	-- refresh-token flow against accounts.spotify.com, real playback/search calls
-	-- against api.spotify.com, its own draggable floating frame (parented straight
-	-- to Library.Holder, not tied to any Page/Section), and its own token
-	-- persistence to niggahack/token.txt independent of misanthropy's CFG/config
-	-- system - Spotify:SetToken(...) writes there directly, and it's read back
-	-- automatically the next time this widget is constructed. This replaces
-	-- misanthropy's earlier hand-written Spotify integration (removed twice
-	-- earlier for an unresolved runtime bug) with the library's own
-	-- already-built implementation instead of writing another one from scratch.
-	local spSec = newSection(pgPlayer, "Spotify")
-	local spotify = Library:SpotifyPlayer()
-
-	local spShow = spSec:Toggle({
-		Name = "Show player",
-		Default = true,
-		Flag = "sp_show",
-		Callback = function(v: boolean)
-			pcall(function() spotify:SetVisibility(v) end)
-		end,
-	})
-
-	spSec:Label("Token (paste access token, or full JSON w/ refresh_token+client_id+client_secret for auto-refresh)")
-	local spTokenBox = spSec:Textbox({
-		Default = "",
-		Placeholder = "paste token, then Save",
-		Flag = "sp_token_input",
-	})
-	spSec:Button({ Name = "Save token", Callback = function()
-		local text = spTokenBox:Get()
-		if type(text) ~= "string" or text == "" then
-			notify("Spotify", "Paste a token first")
-			return
-		end
-		local ok = pcall(function() spotify:SetToken(text) end)
-		notify("Spotify", ok and "Token saved" or "Failed to save token")
-	end })
-	spSec:Button({ Name = "Refresh now", Callback = function()
-		pcall(function() spotify:Refresh() end)
-	end })
-
-	-- Spotify never exposes a Destroy()/GetInstance() on the object it returns
-	-- (only SetVisibility/Center/SetPosition/GetBounds/SetToken/Refresh), so the
-	-- best available cleanup is hiding it - there's no way to actually tear down
-	-- its Frame from outside the widget's own closure.
-	table.insert(cleanups, function()
-		pcall(function() spotify:SetVisibility(false) end)
-	end)
-
-	-- Deliberately not added to CFG: the widget already persists its own token to
-	-- niggahack/token.txt, and mirroring that secret into misanthropy's own JSON
-	-- config files would just be a second, redundant place for it to leak from.
-	CFG.toggles.sp_show = spShow
 end
 
 ----------------------------------------------------------------------------------
