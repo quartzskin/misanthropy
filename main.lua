@@ -14755,62 +14755,6 @@ do
 end
 
 ----------------------------------------------------------------------------------
--- SECTION 5w9: Lightning Rain
-----------------------------------------------------------------------------------
-do
-	-- A standalone screen-space white flash (parented to `screen`, same
-	-- technique as Ambient Vignette), not literally wired to the Rain or
-	-- Thunder toggles above - those are self-contained sections with no
-	-- externally-reachable state, so this is meant to be turned on
-	-- alongside Rain by hand rather than auto-syncing with it.
-	local lrSec = newSection(pgWorld, "Lightning Rain")
-	local lrEnabled = lrSec:Toggle({ Name = "Enabled", Default = false, Flag = "lr_enabled" })
-	local lrColor = newColorpicker(lrSec, { Name = "Color", Default = Color3.fromRGB(255, 255, 255), Alpha = 1, Flag = "lr_color" })
-	local lrSettings = settingsOf(lrSec, lrEnabled)
-	local lrFrequency = lrSettings:Slider({ Name = "Frequency", Min = 3, Max = 60, Step = 1, Default = 15, Suffix = "ds", Flag = "lr_frequency" })
-	local lrIntensity = lrSettings:Slider({ Name = "Intensity", Min = 10, Max = 100, Step = 5, Default = 50, Suffix = "%", Flag = "lr_intensity" })
-
-	local lrFlash = Instance.new("Frame")
-	lrFlash.Name = "MisanthropyLightningFlash"
-	lrFlash.Size = UDim2.fromScale(1, 1)
-	lrFlash.BackgroundColor3 = Color3.new(1, 1, 1)
-	lrFlash.BorderSizePixel = 0
-	lrFlash.BackgroundTransparency = 1
-	lrFlash.Visible = false
-	lrFlash.Parent = screen
-	table.insert(cleanups, function() lrFlash:Destroy() end)
-
-	local LrTweenService = game:GetService("TweenService")
-	local lrLastFlash = 0
-	local rsLr = RunService.Heartbeat:Connect(function()
-		if not lrEnabled:Get() then
-			lrFlash.Visible = false
-			return
-		end
-		local now = os.clock()
-		if now - lrLastFlash >= lrFrequency:Get() then
-			lrLastFlash = now
-			lrFlash.Visible = true
-			lrFlash.BackgroundColor3 = lrColor:Get()
-			lrFlash.BackgroundTransparency = 1
-			local peak = 1 - (lrIntensity:Get() / 100)
-			local flashIn = LrTweenService:Create(lrFlash, TweenInfo.new(0.05, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundTransparency = peak })
-			flashIn:Play()
-			flashIn.Completed:Connect(function()
-				local flashOut = LrTweenService:Create(lrFlash, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { BackgroundTransparency = 1 })
-				flashOut:Play()
-				flashOut.Completed:Connect(function() lrFlash.Visible = false end)
-			end)
-		end
-	end)
-	table.insert(cleanups, function() rsLr:Disconnect() end)
-
-	CFG.toggles.lr_enabled = lrEnabled
-	CFG.sliders.lr_frequency = lrFrequency; CFG.sliders.lr_intensity = lrIntensity
-	CFG.colors.lr_color = lrColor
-end
-
-----------------------------------------------------------------------------------
 -- SECTION 5w10: Blizzard
 ----------------------------------------------------------------------------------
 do
@@ -15833,18 +15777,21 @@ end
 -- SECTION 5x11: Shadow Echo
 ----------------------------------------------------------------------------------
 do
-	-- A delayed copy of your own real position/orientation, not a clone of
-	-- other players or a fabricated "what others see" - a rolling buffer of
-	-- (time, CFrame) samples of your own root, replayed `delay` seconds
-	-- late. The echo body itself is a low-poly stand-in (6 plain Parts,
-	-- head/torso/arms/legs) rather than cloning the actual character mesh,
-	-- same "no guessed asset, build from plain Parts" approach as Cape/
-	-- Ground Runes.
+	-- Still a delayed replay of your own real position/orientation only -
+	-- not a clone of other players or a fabricated "what others see" (see
+	-- the Boundaries section at the bottom of this file) - but the echo
+	-- body itself is now a real character:Clone() instead of a low-poly
+	-- stand-in, sanitized the same way Model Skin's "Full Model" overlay
+	-- sanitizes an inserted asset (strip Scripts, anchor + decollide every
+	-- BasePart). "Count" spawns multiple echoes, each sampling the same
+	-- position buffer at a further multiple of the delay, so they trail
+	-- off behind you like a conga line rather than one single ghost.
 	local seSec = newSection(pgCharacter, "Shadow Echo")
 	local seEnabled = seSec:Toggle({ Name = "Enabled", Default = false, Flag = "se_enabled" })
 	local seColor = newColorpicker(seSec, { Name = "Color", Default = Color3.fromRGB(10, 10, 15), Alpha = 1, Flag = "se_color" })
 	local seSettings = settingsOf(seSec, seEnabled)
-	local seDelay = seSettings:Slider({ Name = "Delay", Min = 2, Max = 20, Step = 1, Default = 6, Suffix = "ds", Flag = "se_delay" })
+	local seCount = seSettings:Slider({ Name = "Echo count", Min = 1, Max = 8, Step = 1, Default = 3, Flag = "se_count" })
+	local seDelay = seSettings:Slider({ Name = "Delay per echo", Min = 2, Max = 20, Step = 1, Default = 5, Suffix = "ds", Flag = "se_delay" })
 	local seTrans = seSettings:Slider({ Name = "Transparency", Min = 20, Max = 90, Step = 5, Default = 55, Suffix = "%", Flag = "se_trans" })
 
 	local seFolder = Instance.new("Folder")
@@ -15852,22 +15799,93 @@ do
 	seFolder.Parent = Workspace
 	table.insert(cleanups, function() if seFolder then seFolder:Destroy() end end)
 
-	local function makeEchoPart(size: Vector3): BasePart
-		local p = Instance.new("Part")
-		p.Name = "EchoPart"; p.Material = Enum.Material.SmoothPlastic
-		p.Size = size
-		p.Anchored = true; p.CanCollide = false; p.CanQuery = false; p.CanTouch = false; p.CastShadow = false
-		p.Transparency = 1
-		p.Parent = seFolder
-		return p
+	-- Same Script/LocalScript/ModuleScript-strip + anchor-every-BasePart
+	-- approach as Model Skin's sanitizeModel, plus stripping any
+	-- BillboardGui/SurfaceGui (nametag/health-bar style overhead GUIs some
+	-- games attach to the character) since those would look out of place
+	-- floating over a shadow copy.
+	local function sanitizeEchoModel(m: Model)
+		for _, d in ipairs(m:GetDescendants()) do
+			if d:IsA("Script") or d:IsA("LocalScript") or d:IsA("ModuleScript") then
+				d:Destroy()
+			elseif d:IsA("BillboardGui") or d:IsA("SurfaceGui") then
+				d:Destroy()
+			elseif d:IsA("BasePart") then
+				d.Anchored = true
+				d.CanCollide = false; d.CanQuery = false; d.CanTouch = false; d.Massless = true
+				d.CastShadow = false
+			end
+		end
 	end
-	local seHead = makeEchoPart(Vector3.new(1.6, 1.6, 1.6))
-	local seTorso = makeEchoPart(Vector3.new(2, 2.4, 1.2))
-	local seLeftArm = makeEchoPart(Vector3.new(1, 2.2, 1))
-	local seRightArm = makeEchoPart(Vector3.new(1, 2.2, 1))
-	local seLeftLeg = makeEchoPart(Vector3.new(1, 2.2, 1))
-	local seRightLeg = makeEchoPart(Vector3.new(1, 2.2, 1))
-	local seParts = { seHead, seTorso, seLeftArm, seRightArm, seLeftLeg, seRightLeg }
+
+	type Echo = { model: Model, animator: Animator?, tracks: { [string]: AnimationTrack } }
+	local echoes: { Echo } = {}
+
+	local function destroyEchoes()
+		for _, e in ipairs(echoes) do e.model:Destroy() end
+		table.clear(echoes)
+	end
+
+	local function buildEchoes(n: number, char: Model)
+		destroyEchoes()
+		for _ = 1, n do
+			local ok, clone = pcall(function() return char:Clone() end)
+			if ok and clone then
+				sanitizeEchoModel(clone)
+				clone.Name = "ShadowEcho"
+				clone.Parent = seFolder
+				local hum = clone:FindFirstChildOfClass("Humanoid")
+				local animator = hum and hum:FindFirstChildOfClass("Animator")
+				if hum then
+					hum.PlatformStand = true
+				end
+				table.insert(echoes, { model = clone, animator = animator, tracks = {} })
+			end
+		end
+	end
+
+	-- What's actually playing on the real character right now, keyed by
+	-- AnimationId - each echo's own Animator is diffed against this every
+	-- frame so all echoes stay animated in sync with your current motion
+	-- (the echoes are positionally delayed, but play whatever animation is
+	-- live right now rather than a delayed animation history, which would
+	-- need buffering animation state the same way position is buffered).
+	local function getRealPlayingIds(char: Model): { [string]: { priority: Enum.AnimationPriority, looped: boolean } }
+		local result = {}
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		local animator = hum and hum:FindFirstChildOfClass("Animator")
+		if not animator then return result end
+		for _, track in ipairs((animator :: Animator):GetPlayingAnimationTracks()) do
+			local id = track.Animation and track.Animation.AnimationId
+			if id and id ~= "" then
+				result[id] = { priority = track.Priority, looped = track.Looped }
+			end
+		end
+		return result
+	end
+
+	local function syncEchoAnimations(e: Echo, realIds: { [string]: { priority: Enum.AnimationPriority, looped: boolean } })
+		if not e.animator then return end
+		for id, track in pairs(e.tracks) do
+			if not realIds[id] then
+				pcall(function() track:Stop(0.1) end)
+				e.tracks[id] = nil
+			end
+		end
+		for id, info in pairs(realIds) do
+			if not e.tracks[id] then
+				local anim = Instance.new("Animation")
+				anim.AnimationId = id
+				local ok, track = pcall(function() return (e.animator :: Animator):LoadAnimation(anim) end)
+				if ok and track then
+					track.Priority = info.priority
+					track.Looped = info.looped
+					track:Play(0)
+					e.tracks[id] = track
+				end
+			end
+		end
+	end
 
 	type Sample = { time: number, cframe: CFrame }
 	local samples: { Sample } = {}
@@ -15887,42 +15905,63 @@ do
 		return samples[1].cframe
 	end
 
+	local lastSeCount = 0
+	local lastSeChar: Model? = nil
+	local lastSeSig = ""
 	local rsSe = RunService.Heartbeat:Connect(function()
+		local char = getCharacter()
 		local root = getRootPart()
-		if not seEnabled:Get() or not root then
-			for _, p in ipairs(seParts) do p.Transparency = 1 end
+		if not seEnabled:Get() or not char or not root then
+			if #echoes > 0 then destroyEchoes() end
 			table.clear(samples)
+			lastSeChar = nil
 			return
 		end
+
 		local now = os.clock()
 		table.insert(samples, { time = now, cframe = root.CFrame })
 		while #samples > SE_MAX_SAMPLES do table.remove(samples, 1) end
 		while #samples > 1 and (now - samples[1].time) > 30 do table.remove(samples, 1) end
 
-		local delay = seDelay:Get() / 10
-		local echoCf = sampleAt(now - delay)
-		if not echoCf then
-			for _, p in ipairs(seParts) do p.Transparency = 1 end
-			return
+		local n = math.floor(seCount:Get())
+		if n ~= lastSeCount or char ~= lastSeChar or #echoes == 0 then
+			lastSeCount = n
+			lastSeChar = char
+			buildEchoes(n, char)
 		end
 
-		local trans = seTrans:Get() / 100
 		local col = seColor:Get()
-		for _, p in ipairs(seParts) do
-			p.Color = col
-			p.Transparency = trans
+		local trans = seTrans:Get() / 100
+		local sig = string.format("%s|%.2f", col:ToHex(), trans)
+		if sig ~= lastSeSig then
+			lastSeSig = sig
+			for _, e in ipairs(echoes) do
+				for _, d in ipairs(e.model:GetDescendants()) do
+					if d:IsA("BasePart") then
+						d.Color = col
+						d.Transparency = trans
+					end
+				end
+			end
 		end
-		seTorso.CFrame = echoCf
-		seHead.CFrame = echoCf * CFrame.new(0, 1.9, 0)
-		seLeftArm.CFrame = echoCf * CFrame.new(-1.4, 0, 0)
-		seRightArm.CFrame = echoCf * CFrame.new(1.4, 0, 0)
-		seLeftLeg.CFrame = echoCf * CFrame.new(-0.5, -2.2, 0)
-		seRightLeg.CFrame = echoCf * CFrame.new(0.5, -2.2, 0)
+
+		local delayStep = seDelay:Get() / 10
+		local realIds = getRealPlayingIds(char)
+		for i, e in ipairs(echoes) do
+			local echoCf = sampleAt(now - delayStep * i)
+			if echoCf then
+				pcall(function() e.model:PivotTo(echoCf) end)
+			end
+			syncEchoAnimations(e, realIds)
+		end
 	end)
-	table.insert(cleanups, function() rsSe:Disconnect() end)
+	table.insert(cleanups, function()
+		rsSe:Disconnect()
+		destroyEchoes()
+	end)
 
 	CFG.toggles.se_enabled = seEnabled
-	CFG.sliders.se_delay = seDelay; CFG.sliders.se_trans = seTrans
+	CFG.sliders.se_count = seCount; CFG.sliders.se_delay = seDelay; CFG.sliders.se_trans = seTrans
 	CFG.colors.se_color = seColor
 end
 
@@ -16029,176 +16068,6 @@ do
 	CFG.toggles.aw_enabled = awEnabled
 	CFG.sliders.aw_count = awCount; CFG.sliders.aw_radius = awRadius; CFG.sliders.aw_dartspeed = awDartSpeed
 	CFG.colors.aw_color = awColor
-end
-
-----------------------------------------------------------------------------------
--- SECTION 5x13: Rune Glow Seams
-----------------------------------------------------------------------------------
-do
-	-- Pulsing glow lines held near the torso in a fixed, root-relative
-	-- pattern - not tracked to individual limb parts, since this game's rig
-	-- type (R6 vs R15, different part names) isn't assumed anywhere else in
-	-- this file either. Same root-relative-only approach Forcefield and
-	-- Cape already use.
-	local GS_SEAMS = {
-		{ pos = Vector3.new(0, 0.5, 0.61), size = Vector3.new(0.08, 2.2, 0.08) },
-		{ pos = Vector3.new(0, 0.5, -0.61), size = Vector3.new(0.08, 2.2, 0.08) },
-		{ pos = Vector3.new(0.51, 0.5, 0), size = Vector3.new(0.08, 2.2, 0.08) },
-		{ pos = Vector3.new(-0.51, 0.5, 0), size = Vector3.new(0.08, 2.2, 0.08) },
-		{ pos = Vector3.new(0, 1.5, 0), size = Vector3.new(1.1, 0.08, 1.1) },
-		{ pos = Vector3.new(0, -0.5, 0), size = Vector3.new(1.1, 0.08, 1.1) },
-	}
-	local gsSec = newSection(pgCharacter, "Rune Glow Seams")
-	local gsEnabled = gsSec:Toggle({ Name = "Enabled", Default = false, Flag = "gs_enabled" })
-	local gsColor = newColorpicker(gsSec, { Name = "Color", Default = Color3.fromRGB(255, 60, 60), Alpha = 1, Flag = "gs_color" })
-	local gsSettings = settingsOf(gsSec, gsEnabled)
-	local gsSpeed     = gsSettings:Slider({ Name = "Pulse speed", Min = 10, Max = 200, Step = 10, Default = 80, Suffix = "%", Flag = "gs_speed" })
-	local gsIntensity = gsSettings:Slider({ Name = "Intensity", Min = 20, Max = 100, Step = 5, Default = 70, Suffix = "%", Flag = "gs_intensity" })
-
-	local gsFolder = Instance.new("Folder")
-	gsFolder.Name = "MisanthropyRuneGlowSeams"
-	gsFolder.Parent = Workspace
-	table.insert(cleanups, function() if gsFolder then gsFolder:Destroy() end end)
-
-	local gsParts: { BasePart } = {}
-	for _ = 1, #GS_SEAMS do
-		local p = Instance.new("Part")
-		p.Name = "RuneSeam"; p.Material = Enum.Material.Neon
-		p.Anchored = true; p.CanCollide = false; p.CanQuery = false; p.CanTouch = false; p.CastShadow = false
-		p.Transparency = 1
-		p.Parent = gsFolder
-		table.insert(gsParts, p)
-	end
-
-	local rsGs = RunService.Heartbeat:Connect(function()
-		local root = getRootPart()
-		if not gsEnabled:Get() or not root then
-			for _, p in ipairs(gsParts) do p.Transparency = 1 end
-			return
-		end
-		local col = gsColor:Get()
-		local speed = gsSpeed:Get() / 100
-		local intensity = gsIntensity:Get() / 100
-		local t = os.clock() * speed
-		local pulse = 0.5 + math.sin(t * 3) * 0.5
-		for i, def in ipairs(GS_SEAMS) do
-			local p = gsParts[i]
-			p.Size = def.size
-			p.Color = col
-			p.Transparency = 1 - (intensity * (0.4 + pulse * 0.6))
-			p.CFrame = root.CFrame * CFrame.new(def.pos)
-		end
-	end)
-	table.insert(cleanups, function() rsGs:Disconnect() end)
-
-	CFG.toggles.gs_enabled = gsEnabled
-	CFG.sliders.gs_speed = gsSpeed; CFG.sliders.gs_intensity = gsIntensity
-	CFG.colors.gs_color = gsColor
-end
-
-----------------------------------------------------------------------------------
--- SECTION 5x14: Static Discharge
-----------------------------------------------------------------------------------
-do
-	-- Uses Beam instances (a technique nothing else in this file uses -
-	-- everywhere else is Trail/ParticleEmitter/plain Parts), between two
-	-- Attachments on invisible anchor parts. Since no lightning-zigzag
-	-- texture asset ID is guessed, the crackle comes entirely from rapidly
-	-- re-randomizing both endpoint positions and the Beam's own
-	-- CurveSize0/CurveSize1 on a short interval, not from a texture.
-	local sdSec = newSection(pgCharacter, "Static Discharge")
-	local sdEnabled = sdSec:Toggle({ Name = "Enabled", Default = false, Flag = "sd_enabled" })
-	local sdColor = newColorpicker(sdSec, { Name = "Color", Default = Color3.fromRGB(140, 200, 255), Alpha = 1, Flag = "sd_color" })
-	local sdSettings = settingsOf(sdSec, sdEnabled)
-	local sdCount  = sdSettings:Slider({ Name = "Arc count", Min = 1, Max = 12, Step = 1, Default = 5, Flag = "sd_count" })
-	local sdRadius = sdSettings:Slider({ Name = "Radius", Min = 1, Max = 8, Step = 1, Default = 3, Flag = "sd_radius" })
-	local sdRate   = sdSettings:Slider({ Name = "Crackle rate", Min = 5, Max = 100, Step = 5, Default = 40, Suffix = "%", Flag = "sd_rate" })
-	local sdWidth  = sdSettings:Slider({ Name = "Width", Min = 2, Max = 20, Step = 1, Default = 6, Flag = "sd_width" })
-
-	local sdFolder = Instance.new("Folder")
-	sdFolder.Name = "MisanthropyStaticDischarge"
-	sdFolder.Parent = Workspace
-	table.insert(cleanups, function() if sdFolder then sdFolder:Destroy() end end)
-
-	type Arc = { beam: Beam, anchor0: BasePart, anchor1: BasePart, nextFlicker: number }
-	local arcs: { Arc } = {}
-
-	local function destroyArcs()
-		for _, a in ipairs(arcs) do a.anchor0:Destroy(); a.anchor1:Destroy() end
-		table.clear(arcs)
-	end
-
-	local function randomPoint(radius: number): Vector3
-		return Vector3.new(
-			math.random(-100, 100) / 100 * radius,
-			math.random(-50, 150) / 100 * radius,
-			math.random(-100, 100) / 100 * radius
-		)
-	end
-
-	local function makeArcAnchor(): BasePart
-		local p = Instance.new("Part")
-		p.Name = "ArcAnchor"
-		p.Anchored = true; p.CanCollide = false; p.CanQuery = false; p.CanTouch = false; p.CastShadow = false
-		p.Transparency = 1; p.Size = Vector3.new(0.1, 0.1, 0.1)
-		p.Parent = sdFolder
-		return p
-	end
-
-	local function buildArcs(n: number)
-		destroyArcs()
-		for _ = 1, n do
-			local anchor0, anchor1 = makeArcAnchor(), makeArcAnchor()
-			local a0 = Instance.new("Attachment"); a0.Parent = anchor0
-			local a1 = Instance.new("Attachment"); a1.Parent = anchor1
-			local beam = Instance.new("Beam")
-			beam.Attachment0 = a0; beam.Attachment1 = a1
-			beam.FaceCamera = true
-			beam.Width0 = 0; beam.Width1 = 0
-			beam.Segments = 8
-			beam.Parent = anchor0
-			table.insert(arcs, { beam = beam, anchor0 = anchor0, anchor1 = anchor1, nextFlicker = 0 })
-		end
-	end
-
-	local lastCount = 0
-	local rsSd = RunService.Heartbeat:Connect(function()
-		if not sdEnabled:Get() then
-			if #arcs > 0 then destroyArcs() end
-			return
-		end
-		local root = getRootPart()
-		if not root then return end
-		local n = math.floor(sdCount:Get())
-		if n ~= lastCount or #arcs == 0 then
-			lastCount = n
-			buildArcs(n)
-		end
-		local col = sdColor:Get()
-		local radius = sdRadius:Get()
-		local rate = sdRate:Get() / 100
-		local width = sdWidth:Get() / 10
-		local now = os.clock()
-		for _, arc in ipairs(arcs) do
-			arc.beam.Color = ColorSequence.new(col)
-			arc.beam.Width0 = width; arc.beam.Width1 = width
-			if now >= arc.nextFlicker then
-				arc.nextFlicker = now + (0.35 - rate * 0.3) * (0.5 + math.random())
-				arc.anchor0.CFrame = CFrame.new(root.Position + randomPoint(radius))
-				arc.anchor1.CFrame = CFrame.new(root.Position + randomPoint(radius))
-				arc.beam.CurveSize0 = math.random(-100, 100) / 100 * 3
-				arc.beam.CurveSize1 = math.random(-100, 100) / 100 * 3
-			end
-		end
-	end)
-	table.insert(cleanups, function()
-		rsSd:Disconnect()
-		destroyArcs()
-	end)
-
-	CFG.toggles.sd_enabled = sdEnabled
-	CFG.sliders.sd_count = sdCount; CFG.sliders.sd_radius = sdRadius; CFG.sliders.sd_rate = sdRate; CFG.sliders.sd_width = sdWidth
-	CFG.colors.sd_color = sdColor
 end
 
 ----------------------------------------------------------------------------------
@@ -16693,129 +16562,6 @@ do
 
 	CFG.toggles.cm_enabled = cmEnabled
 	CFG.sliders.cm_intensity = cmIntensity; CFG.sliders.cm_speed = cmSpeed
-end
-
-----------------------------------------------------------------------------------
--- SECTION 5z7: Footprint Decals
-----------------------------------------------------------------------------------
-do
-	-- Distinct from Footsteps above (bright Neon outline shapes, visible
-	-- through walls): flat dark ground-blended ovals, closer to a real
-	-- dirt/mud footprint. Same SpecialMesh(Sphere)-with-non-uniform-Scale
-	-- flattening technique buildFallingDebris already uses for its leaf/
-	-- petal pieces, not a Cylinder Shape (which doesn't reliably give an
-	-- elongated oval cross-section). Same step-detection/raycast pattern
-	-- as Footsteps, independent pooled parts, no shape dropdown.
-	local fdSec = newSection(pgPlayer, "Footprint Decals")
-	local fdEnabled = fdSec:Toggle({ Name = "Enabled", Default = false, Flag = "fd_enabled" })
-	local fdColor = newColorpicker(fdSec, { Name = "Color", Default = Color3.fromRGB(35, 25, 20), Alpha = 1, Flag = "fd_color" })
-	local fdSettings = settingsOf(fdSec, fdEnabled)
-	local fdSize    = fdSettings:Slider({ Name = "Size", Min = 20, Max = 200, Step = 5, Default = 100, Suffix = "%", Flag = "fd_size" })
-	local fdFade    = fdSettings:Slider({ Name = "Fade time", Min = 20, Max = 200, Step = 10, Default = 80, Suffix = "ds", Flag = "fd_fade" })
-	local fdSpacing = fdSettings:Slider({ Name = "Step spacing", Min = 10, Max = 100, Step = 5, Default = 35, Suffix = "ds", Flag = "fd_spacing" })
-	local fdWidth   = fdSettings:Slider({ Name = "Stance width", Min = 0, Max = 30, Step = 1, Default = 8, Suffix = "ds", Flag = "fd_width" })
-
-	local fdFolder = Instance.new("Folder")
-	fdFolder.Name = "MisanthropyFootprintDecals"
-	fdFolder.Parent = Workspace
-	table.insert(cleanups, function() if fdFolder then fdFolder:Destroy() end end)
-
-	local FD_MAX = 30
-	type Print = { part: BasePart, mesh: SpecialMesh, born: number, active: boolean }
-	local prints: { Print } = {}
-	for _ = 1, FD_MAX do
-		local p = Instance.new("Part")
-		p.Name = "Footprint"
-		p.Material = Enum.Material.SmoothPlastic
-		p.Anchored = true; p.CanCollide = false; p.CanQuery = false; p.CanTouch = false; p.CastShadow = false
-		p.Transparency = 1
-		p.Size = Vector3.new(1, 1, 1)
-		p.Parent = fdFolder
-		local mesh = Instance.new("SpecialMesh")
-		mesh.MeshType = Enum.MeshType.Sphere
-		mesh.Parent = p
-		table.insert(prints, { part = p, mesh = mesh, born = 0, active = false })
-	end
-
-	local nextPrint = 1
-	local function spawnPrint(base: CFrame, size: number)
-		local pr = prints[nextPrint]
-		nextPrint = (nextPrint % FD_MAX) + 1
-		pr.active = true
-		pr.born = os.clock()
-		pr.mesh.Scale = Vector3.new(size * 0.35, 0.04, size * 0.7)
-		pr.part.CFrame = base
-	end
-
-	local distSinceStep = 0
-	local lastPos: Vector3? = nil
-	local leftFoot = false
-	local rsFd = RunService.RenderStepped:Connect(function()
-		local now = os.clock()
-		local fadeTime = fdFade:Get() / 10
-		local col = fdColor:Get()
-		for _, pr in ipairs(prints) do
-			if pr.active then
-				local age = now - pr.born
-				if age >= fadeTime then
-					pr.active = false
-					pr.part.Transparency = 1
-				else
-					pr.part.Color = col
-					pr.part.Transparency = 0.15 + (age / fadeTime) * 0.85
-				end
-			end
-		end
-
-		local root = getRootPart()
-		if not (fdEnabled:Get() and root) then
-			lastPos = nil
-			return
-		end
-
-		local char = getCharacter()
-		local hum = char and char:FindFirstChildOfClass("Humanoid")
-		local grounded = hum and hum.FloorMaterial ~= Enum.Material.Air
-
-		local pos = root.Position
-		if lastPos then
-			local delta = (pos - lastPos) * Vector3.new(1, 0, 1)
-			if grounded then
-				distSinceStep += delta.Magnitude
-			end
-		end
-		lastPos = pos
-
-		local spacing = fdSpacing:Get() / 10
-		if grounded and distSinceStep >= spacing then
-			distSinceStep = 0
-			leftFoot = not leftFoot
-
-			local rayParams = RaycastParams.new()
-			rayParams.FilterType = Enum.RaycastFilterType.Exclude
-			rayParams.FilterDescendantsInstances = { char :: Instance, fdFolder }
-			local result = Workspace:Raycast(pos, Vector3.new(0, -10, 0), rayParams)
-			if result then
-				local look = root.CFrame.LookVector * Vector3.new(1, 0, 1)
-				local yaw = 0
-				if look.Magnitude > 0.001 then
-					look = look.Unit
-					yaw = math.atan2(-look.X, -look.Z)
-				end
-				local rightVec = root.CFrame.RightVector * Vector3.new(1, 0, 1)
-				local side = (fdWidth:Get() / 10) * 0.5 * (leftFoot and -1 or 1)
-				local stepPos = result.Position + rightVec.Unit * side + Vector3.new(0, 0.05, 0)
-				local base = CFrame.new(stepPos) * CFrame.Angles(0, yaw, 0)
-				spawnPrint(base, fdSize:Get() / 100)
-			end
-		end
-	end)
-	table.insert(cleanups, function() rsFd:Disconnect() end)
-
-	CFG.toggles.fd_enabled = fdEnabled
-	CFG.sliders.fd_size = fdSize; CFG.sliders.fd_fade = fdFade
-	CFG.sliders.fd_spacing = fdSpacing; CFG.sliders.fd_width = fdWidth
-	CFG.colors.fd_color = fdColor
 end
 
 ----------------------------------------------------------------------------------
