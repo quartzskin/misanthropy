@@ -3,21 +3,9 @@
 
 
 ----------------------------------------------------------------------------------
--- EMBEDDED: UI library (vendored, originally Library.lua by @joestar._3, NH ui
--- library / sametexe001/sametlibs). Everything below through the matching banner
--- is that library's code, verbatim, EXCEPT four widget constructors that were
--- deliberately stripped before vendoring: ESPPreview, TargetIndicator, RadarWidget,
--- and ModeratorList. Those exist purely to build aimbot/ESP/staff-evasion cheat
--- menus (ModeratorList's only purpose is alerting the user when a moderator is
--- nearby so they can hide cheating) and misanthropy will never use them - they were
--- removed from the source itself, not just left unused, so that capability isn't
--- sitting in this file at all. Confirmed self-contained (no other code in the
--- library referenced them) before removal. The library's own trailing
--- 'return Library' was also removed - it's meant to be consumed via
--- loadstring(...)(), which returns from that isolated chunk; textually spliced in
--- like this, an un-removed top-level return would have terminated this entire
--- script the moment it was reached, exactly like the BindToRenderStep incident, but
--- worse (everything after it, forever, not just on re-execution).
+-- EMBEDDED: UI library (vendored, Library.lua by @joestar._3 / sametexe001/sametlibs).
+-- ESPPreview/TargetIndicator/RadarWidget/ModeratorList stripped before vendoring.
+-- Trailing top-level `return Library` removed (see CLAUDE.md for why).
 ----------------------------------------------------------------------------------
 --[[
     2/22/2026
@@ -1071,12 +1059,7 @@ do
     end
 
     Library.Round = function(Self, Number, Float)
-        -- Float is Slider.Decimals, and 0 (the default for any Slider that
-        -- doesn't pass Decimals explicitly - which is every slider in this
-        -- file) is truthy in Lua, so a bare `Float or 1` picks 0 instead of
-        -- 1: Multiplier = 1/0 = inf, and the result is inf/inf = NaN. Same
-        -- bug chudvision had in the same spot - treat 0 the same as
-        -- omitted/nil here too.
+        -- Decimals=0 is truthy in Lua; treat it as omitted to avoid 1/0 = NaN.
         local Multiplier = 1 / ((Float and Float ~= 0) and Float or 1)
         return math.floor(Number * Multiplier) / Multiplier
     end
@@ -9641,65 +9624,26 @@ screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screen.DisplayOrder = 9999
 screen.Parent = guiParent
 
--- This library exposes widget state through a plain `.Value` field (plus a
--- global Library.Flags[flag] mirror) instead of a :Get() method - Toggle,
--- Slider, Dropdown, Textbox and Button all end their constructors with
--- `setmetatable(X, Library)`, i.e. they all share this exact `Library` table
--- as their metatable/__index. Every one of misanthropy's ~28 sections calls
--- :Get() throughout its render loop (ported straight from the chudvision
--- build, which did have a real :Get()), so rather than touch every call
--- site, add the missing method once here, generically, for all of them.
--- Colorpicker is the one exception - Library.CreateColorpicker returns a
--- bare table with no setmetatable call, so it doesn't inherit this, and its
--- state isn't even shaped like a single Value (current color lives in
--- .Color/.Alpha, while .Value there means HSV brightness) - handled instead
--- inside newColorpicker below.
+-- Generic :Get() shim - Toggle/Slider/Dropdown/Textbox/Button all share the
+-- Library metatable. Colorpicker is handled separately in newColorpicker.
 Library.Get = function(self)
 	return self.Value
 end
 
--- Library.Holder (the embed's own ScreenGui, parented to gethui()/CoreGui) is
--- created with no explicit DisplayOrder, defaulting to 0. This file's own
--- "screen" ScreenGui (built further down, used for the splash screen / HP
--- vignette flash / Image overlay) sits at DisplayOrder 9999 - match it
--- rather than going above it, since going all the way to Int32 max (tried
--- earlier while chasing an unrelated unresponsive-UI report) put this menu
--- on top of literally everything, which wasn't wanted; the actual fix for
--- that report turned out to be the Library.Round NaN bug above, not this.
 Library.Holder.Instance.DisplayOrder = 9999
-
--- User asked for the library's own decorative background blur + falling
--- snow (both on by default - Library.BackgroundBlurEnabled/
--- BackgroundSnowEnabled) to be off. Both are read live by
--- Library:SetBackgroundEffectsVisible, which Window:SetOpen calls every
--- time the window opens/closes, so setting the flags before the window
--- ever opens is enough - no need to call SetBackgroundEffectsVisible here.
 Library.BackgroundBlurEnabled = false
 Library.BackgroundSnowEnabled = false
 
--- Every feature below is hosted in its own window from the embedded UI
--- library instead of nhack's Lua tab. nhack keeps a "misanthropy" tab
--- (still under its own AddTab, since nhack owns the default Lua tab and
--- exposes no rename API for it), but that tab now holds nothing except a
--- toggle for the window's visibility.
 local Window = Library:Window({ Title = "misanthropy.lua", ButtonName = "misanthropy.lua" })
 
--- User asked for the window's own outer border to be off too. MainFrame's
--- constructor creates two UIStrokes (Outline + Border theme colors) directly
--- on itself anonymously - not exposed by name through Window.Items - so
--- reach them the only way available: filter MainFrame's own children.
+-- Disable MainFrame's own outer border UIStrokes (not exposed by name).
 for _, child in Window.Items["MainFrame"].Instance:GetChildren() do
 	if child:IsA("UIStroke") then
 		child.Enabled = false
 	end
 end
 
--- This library ships its own hardcoded "X toggles the window" shortcut
--- (Library.MenuKeybind, default Enum.KeyCode.X). Same reasoning as the
--- chudvision build this replaced: that's a second, unsynced path to the
--- same Window:SetOpen state as the toggle/keybind below, so it's disabled
--- here - visibility is meant to be controlled from exactly one place.
-Library.MenuKeybind = "None"
+Library.MenuKeybind = "None" -- single source of truth: the nhack toggle/keybind below
 
 local NhackTab = getgenv().Nhack:AddTab("misanthropy")
 local uiToggleSec = NhackTab:Section("misanthropy UI")
@@ -9712,16 +9656,6 @@ local uiToggle = uiToggleSec:Toggle({
 	end,
 })
 
--- nhack's Toggle is expected to mirror this embedded library's own
--- Toggle:Keybind(Data) (same shared library lineage as the rest of nhack's
--- API), which draws a rebindable keybind row inline next to the toggle. If
--- this particular nhack build doesn't have it, fall back to a plain hotkey
--- so "toggle UI" still has a keybind either way. The callback uses the
--- boolean the keybind itself hands back rather than flipping
--- uiToggle:Get() - if nhack's Keybind also syncs the parent Toggle on its
--- own (undocumented, can't verify without nhack's source), a relative flip
--- could double-apply and get stuck; setting the delivered value directly
--- can't compound that way.
 if type(uiToggle.Keybind) == "function" then
 	uiToggle:Keybind({
 		Name = "Show UI Keybind",
@@ -9741,14 +9675,6 @@ else
 	end)
 end
 
--- Every feature section below lands on one SubPage of one of these Pages.
--- This library nests Window -> Page -> SubPage -> Section (chudvision only
--- had Window -> Page -> Section - one less layer), so each top-level
--- "page" here gets exactly one SubPage as a pass-through to actually reach
--- the Section level; we never use this library's sub-tab feature for
--- anything, there's just nowhere else to hang a Section off of. Each Page
--- ends up with a single, always-active sub-tab as a visible side effect -
--- harmless, just an artifact of the library's structure.
 local function newPage(name: string): any
 	local page = Window:Page({ Name = name })
 	return page:SubPage({ Name = name })
@@ -9767,18 +9693,10 @@ local function newSection(page: any, name: string): any
 	return page:Section({ Name = name, Side = side })
 end
 
--- This library has native Toggle:Settings() (an inline gear-icon popup
--- panel), unlike chudvision which had no such thing and needed a hand-built
--- SetVisibility-cascade shim. settingsOf is now just a thin pass-through,
--- kept only so every one of the ~28 existing settingsOf(section, toggle)
--- call sites across every feature section keeps working unchanged -
--- `section` is unused here, kept purely for call-site compatibility.
 local function settingsOf(section: any, toggle: any): any
 	return toggle:Settings()
 end
 
--- This library has a real native toast (Library:Notification(Text,
--- Duration, Color)), unlike chudvision which had none at all.
 local function notify(title: string, text: string)
 	pcall(function() Library:Notification(title .. ": " .. text, 4, Library.Theme["Accent"]) end)
 end
@@ -9786,19 +9704,7 @@ end
 local cleanups: { () -> () } = {}
 local CFG = { toggles = {}, sliders = {}, dropdowns = {}, colors = {} }
 
--- Colorpicker only ever hangs off a Toggle or a Label in this library too
--- (same as chudvision). Unlike Toggle/Slider/Dropdown/Textbox, Colorpicker
--- doesn't share the Library metatable (Library.CreateColorpicker returns a
--- bare table), so the generic Library.Get patch above doesn't reach it, and
--- its .Value field means HSV brightness, not "the current color" - the real
--- state is .Color (a Color3) and .Alpha (a number). Attach a matching
--- :Get() here that returns those two, same call shape every existing
--- section already expects (local col, alpha = picker:Get()).
 local function newColorpicker(parent: any, opts: any): any
-	-- Library.Label takes a Params TABLE (Params.Name), not a bare string -
-	-- a bare string indexed with .Name in Lua just returns nil, which is why
-	-- every colorpicker/textbox label in this file was rendering the literal
-	-- fallback text "Label" instead of its real name.
 	local picker = parent:Label({ Name = opts.Name }):Colorpicker({
 		Flag = opts.Flag or opts.Name,
 		Default = opts.Default or Color3.new(1, 1, 1),
@@ -9811,9 +9717,6 @@ local function newColorpicker(parent: any, opts: any): any
 	return picker
 end
 
--- This library's Textbox also has no caption of its own (same limitation
--- as chudvision's), so this still prepends a :Label(...) call - see the
--- Params-table note in newColorpicker above for why it's {Name=...} now.
 local function newTextInput(parent: any, opts: any): any
 	parent:Label({ Name = opts.Name })
 	return parent:Textbox(opts)
@@ -10748,12 +10651,7 @@ do
 	fsFolder.Parent = Workspace
 	table.insert(cleanups, function() if fsFolder then fsFolder:Destroy() end end)
 
-	-- A small expanding+fading ring at each step, distinct from Landing/
-	-- Aura Pulse shockwaves - this one fires per footstep, not on landing.
-	-- Flat, thin Cylinder rotated 90 about Z (its native circular face is on
-	-- the X axis, so this points that face straight up/down) tweened wider
-	-- and more transparent, same "expanding disc" technique as the rest of
-	-- this file's shockwave-style effects.
+	-- Cylinder rotated 90 about Z so its circular face points up/down, tweened wider + more transparent.
 	local FsTweenService = game:GetService("TweenService")
 	local function spawnFootShockwave(pos: Vector3, col: Color3)
 		local ring = Instance.new("Part")
@@ -11130,11 +11028,6 @@ do
 	emBurstFolder.Parent = Workspace
 	table.insert(cleanups, function() if emBurstFolder then emBurstFolder:Destroy() end end)
 
-	-- One-shot ParticleEmitter:Emit(n) burst, fired once per emote start.
-	-- All three styles reuse the same confirmed-safe sparkle texture already
-	-- used elsewhere in this file (Fireflies/Aura Pulse) rather than
-	-- guessing at new asset IDs for "confetti"/"petals" - the styles are
-	-- differentiated purely through color/speed/spread/gravity instead.
 	local function spawnEmoteBurst(root: BasePart)
 		local anchor = Instance.new("Part")
 		anchor.Name = "EmoteBurstAnchor"
@@ -11192,8 +11085,6 @@ do
 	local currentTrack: AnimationTrack? = nil
 	local animInstance: Animation? = nil
 
-	-- populated by "Scan game animations" below; playEmote() consults this
-	-- so the "now playing" readout can show a real name, not just the ID.
 	local foundAnims: { { label: string, id: string } } = {}
 	local pickIndex = 0
 
@@ -11444,17 +11335,7 @@ do
 		end
 	end
 
-	-- Live preview of the mesh/texture ID before it's ever applied to the
-	-- character - a ViewportFrame + Camera + a single mesh Part, the same
-	-- general technique the vendored library's own (stripped) ESPPreview
-	-- widget used for rendering a 3D subject inside a 2D GUI panel, rebuilt
-	-- clean here from scratch for a completely different, cosmetic purpose
-	-- (nothing from ESPPreview's actual code was reused - it's gone, not
-	-- just unused, per the boundary documented in "How it loads"). Its own
-	-- floating, draggable window - parented straight to Library.Holder like
-	-- the Spotify/Watermark widgets, not tucked inside any Section or
-	-- Settings popup - since the point is to see it change live while
-	-- editing the ID fields without needing the settings cog open at all.
+	-- Live mesh/texture preview: ViewportFrame + Camera, own floating window on Library.Holder.
 	local previewWindow = Library:Create("Frame", {
 		Name = "\0",
 		Parent = Library.Holder.Instance,
@@ -11502,11 +11383,7 @@ do
 	previewCamera.Parent = previewFrame
 	previewFrame.CurrentCamera = previewCamera
 
-	-- GetExtentsSize() is a Model method, not a BasePart one (BasePart has no
-	-- equivalent) - wrap the preview part in its own Model so
-	-- Model:GetBoundingBox() can be used instead, which does correctly
-	-- account for the SpecialMesh's actual rendered geometry, not just the
-	-- Part's own Size.
+	-- Wrapped in a Model since GetBoundingBox() is a Model method, not a BasePart one.
 	local previewModel = Instance.new("Model")
 	previewModel.Name = "PreviewModel"
 	previewModel.Parent = previewFrame
@@ -13063,10 +12940,6 @@ do
 		Color3.fromRGB(245, 245, 250),
 	}, { prefix = "fh", maxCount = 70, fallSpeed = 22, radius = 50, windX = 18, windZ = 12, lifetime = 15 })
 
-	-- Screen-wide celebratory fall, distinct scale from Emote Burst (which
-	-- fires once at your own position) - small flat multicolor squares
-	-- instead of a themed natural-debris palette, otherwise identical
-	-- fourth instance of the same builder.
 	buildFallingDebris("Falling Confetti", "MisanthropyConfetti", "Confetti", Vector3.new(0.5, 0.05, 0.5), {
 		Color3.fromRGB(255, 60, 90), Color3.fromRGB(255, 210, 40), Color3.fromRGB(60, 180, 255),
 		Color3.fromRGB(80, 230, 120), Color3.fromRGB(200, 90, 255), Color3.fromRGB(255, 140, 40),
@@ -14186,11 +14059,6 @@ end
 -- SECTION 5w4: Embers / Bubbles (shared buildRisingAmbient builder)
 ----------------------------------------------------------------------------------
 do
-	-- Same "shared builder, two instances" shape as buildFallingDebris above
-	-- (Leaves Fall / Cherry Blossoms), but for particles that rise and fade
-	-- out at a max height instead of falling and settling on the ground -
-	-- buildFallingDebris's ground-collision/sink logic doesn't apply here,
-	-- so this is its own simpler builder rather than forcing reuse.
 	local function buildRisingAmbient(sectionName: string, folderName: string, partName: string, cfg: any)
 		local sec = newSection(pgWorld, sectionName)
 		local enabled = sec:Toggle({ Name = "Enabled", Default = false, Flag = cfg.prefix .. "_enabled" })
@@ -14315,9 +14183,6 @@ end
 -- SECTION 5w5: Meteor Shower
 ----------------------------------------------------------------------------------
 do
-	-- Distinct from StarFall above: rarer, bigger, brighter single streaks
-	-- with a long trail, spawned every few seconds rather than a constant
-	-- sprinkle - a "big moment" effect instead of ambient background motion.
 	local mtSec = newSection(pgWorld, "Meteor Shower")
 	local mtEnabled = mtSec:Toggle({ Name = "Enabled", Default = false, Flag = "mt_enabled" })
 	local mtColor = newColorpicker(mtSec, { Name = "Color", Default = Color3.fromRGB(255, 220, 150), Alpha = 1, Flag = "mt_color" })
@@ -14402,10 +14267,6 @@ end
 -- SECTION 5w7: Distant Storm
 ----------------------------------------------------------------------------------
 do
-	-- Silent horizon flashes, separate from Thunder above (which is
-	-- up-close bolts + sound). No SkyDome/Lighting.Brightness flicker here -
-	-- just a big, far-away dim panel that briefly brightens, so it reads as
-	-- "storm on the horizon" without touching global lighting.
 	local dsSec = newSection(pgWorld, "Distant Storm")
 	local dsEnabled = dsSec:Toggle({ Name = "Enabled", Default = false, Flag = "ds_enabled" })
 	local dsColor = newColorpicker(dsSec, { Name = "Color", Default = Color3.fromRGB(210, 220, 255), Alpha = 1, Flag = "ds_color" })
@@ -14462,12 +14323,7 @@ end
 -- SECTION 5w10: Blizzard
 ----------------------------------------------------------------------------------
 do
-	-- Distinct from Snowfall above: motion is wind-dominated (a fixed
-	-- horizontal drift plus only slight fall) rather than gravity-dominated,
-	-- and flakes spawn upwind so they visibly stream across instead of
-	-- fading in overhead. Bespoke lightweight builder, not a reuse of
-	-- buildFallingDebris (that one's ground-collision/settle logic is for
-	-- gravity-dominated debris, not a sideways-blowing flake stream).
+	-- Wind-dominated drift, upwind spawn; bespoke builder (not buildFallingDebris).
 	local bzSec = newSection(pgWorld, "Blizzard")
 	local bzEnabled = bzSec:Toggle({ Name = "Enabled", Default = false, Flag = "bz_enabled" })
 	local bzColor = newColorpicker(bzSec, { Name = "Color", Default = Color3.fromRGB(235, 240, 250), Alpha = 1, Flag = "bz_color" })
@@ -14812,10 +14668,7 @@ end
 -- SECTION 5x12: Aura Wisps
 ----------------------------------------------------------------------------------
 do
-	-- Distinct motion feel from Aura Dots (smooth orbit) and Fireflies
-	-- (gentle wander): each wisp picks a random nearby point, dashes toward
-	-- it with exponential ease-in, pauses briefly on arrival, then picks a
-	-- new target - bursty/erratic instead of continuous.
+	-- Bursty motion: dash toward a random nearby point with ease-in, pause, retarget.
 	local awSec = newSection(pgCharacter, "Aura Wisps")
 	local awEnabled = awSec:Toggle({ Name = "Enabled", Default = false, Flag = "aw_enabled" })
 	local awColor = newColorpicker(awSec, { Name = "Color", Default = Color3.fromRGB(255, 80, 180), Alpha = 1, Flag = "aw_color" })
@@ -15117,9 +14970,7 @@ do
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
 		if not char or not hum then return end
 
-		-- re-baseline on every respawn: a fresh Humanoid may not carry the
-		-- same MaxSlopeAngle the last one had, so always capture what this
-		-- specific character actually started at before we touch it.
+		-- re-baseline per respawn: a fresh Humanoid may not carry the old value
 		if char ~= msaChar then
 			msaChar = char
 			msaOriginal = hum.MaxSlopeAngle
@@ -15148,10 +14999,7 @@ end
 -- SECTION 5z3: Ambient Vignette
 ----------------------------------------------------------------------------------
 do
-	-- A persistent color tint, not a one-shot flash. Roblox's UIGradient is
-	-- linear-only (no radial gradient), so a true edge-darkening vignette
-	-- shape is approximated with four edge frames, each gradient-faded
-	-- toward the screen center, rather than needing an image asset.
+	-- Four gradient-faded edge frames approximate a vignette (UIGradient is linear-only).
 	local avSec = newSection(pgPlayer, "Ambient Vignette")
 	local avEnabled = avSec:Toggle({ Name = "Enabled", Default = false, Flag = "av_enabled" })
 	local avColor = newColorpicker(avSec, { Name = "Color", Default = Color3.fromRGB(0, 0, 0), Alpha = 1, Flag = "av_color" })
@@ -15372,17 +15220,7 @@ end
 -- SECTION 6b: Watermark
 ----------------------------------------------------------------------------------
 do
-	-- This is the vendored library's own Library:Watermark() widget - like
-	-- SpotifyPlayer, it's a standalone opt-in constructor nothing else in the
-	-- library calls automatically. It's a draggable shimmer-text tag with a
-	-- built-in FPS counter and an optional custom text callback
-	-- (:SetDynamicTextProvider). Its DEFAULT behavior (no provider set) formats
-	-- a stats string with os.date(...), which is unavailable in this Luau
-	-- sandbox (see the Roblox/Luau gotchas section below) - so this always
-	-- keeps a DynamicTextProvider installed and never calls :SetText() again
-	-- after setup (:SetText() clears the provider, which would re-enable that
-	-- broken os.date path on the next stats tick). All customization here
-	-- reads live :Get() values from inside the provider callback instead.
+	-- Never call watermark:SetText() - it clears the provider and re-enables the broken os.date default.
 	local wmSec = newSection(pgConfigs, "Watermark")
 	local watermark = Library:Watermark({ Name = "misanthropy.lua" })
 
@@ -15417,8 +15255,6 @@ do
 		end)
 	end)
 
-	-- Same limitation as SpotifyPlayer: no Destroy()/GetInstance() exposed,
-	-- so hiding it is the best available cleanup.
 	table.insert(cleanups, function()
 		pcall(function() watermark:SetVisibility(false) end)
 	end)
