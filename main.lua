@@ -9645,8 +9645,15 @@ end
 
 Library.MenuKeybind = "None" -- single source of truth: the nhack toggle/keybind below
 
-local NhackTab = getgenv().Nhack:AddTab("misanthropy")
-local uiToggleSec = NhackTab:Section("misanthropy UI")
+local nhack = getgenv().Nhack
+local uiToggleSec
+if nhack and type(nhack.AddTab) == "function" then
+	local NhackTab = nhack:AddTab("misanthropy")
+	uiToggleSec = NhackTab:Section("misanthropy UI")
+else
+	local uiPage = Window:Page({ Name = "Settings" }):SubPage({ Name = "Settings" })
+	uiToggleSec = uiPage:Section({ Name = "misanthropy UI", Side = 1 })
+end
 local uiToggle = uiToggleSec:Toggle({
 	Name = "Show UI",
 	Default = true,
@@ -9703,6 +9710,20 @@ end
 
 local cleanups: { () -> () } = {}
 local CFG = { toggles = {}, sliders = {}, dropdowns = {}, colors = {} }
+
+-- The vendored UI only cleans its own connections. Run feature cleanups too so
+-- re-executing the file does not leave old effects or RenderStepped loops alive.
+do
+	local baseExit = Library.Exit
+	Library.Exit = function(self)
+		for i = #cleanups, 1, -1 do
+			pcall(cleanups[i])
+		end
+		table.clear(cleanups)
+		if screen then screen:Destroy() end
+		baseExit(self)
+	end
+end
 
 local function newColorpicker(parent: any, opts: any): any
 	local picker = parent:Label({ Name = opts.Name }):Colorpicker({
@@ -11629,6 +11650,249 @@ do
 	CFG.dropdowns.ms_material = msMaterial; CFG.dropdowns.ms_overlay_type = msOverlayType
 	CFG.dropdowns.ms_spin_axis = msSpinAxis
 	CFG.colors.ms_matcolor = msMatColor
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5h: Tung
+----------------------------------------------------------------------------------
+do
+	local tungSec = newSection(pgCharacter, "Tung")
+	local tungEnabled = tungSec:Toggle({
+		Name = "Enabled",
+		Default = false,
+		Flag = "tung_enabled",
+	})
+
+	local TUNG_BUNDLE_ID = 169035278976453
+	local AssetService = game:GetService("AssetService")
+	local cachedTungDescription: HumanoidDescription? = nil
+	local tungProxy: Model? = nil
+	local tungCharacter: Model? = nil
+	local tungBusy = false
+	local tungFailureCharacter: Model? = nil
+	local tungMotors: { [string]: Motor6D | AnimationConstraint } = {}
+	local tungParts: { BasePart } = {}
+	local savedTungTransparency: { [BasePart]: { transparency: number, localTransparency: number } } = {}
+	local BODY_PART_NAMES = {
+		Head = true,
+		UpperTorso = true, LowerTorso = true,
+		LeftUpperArm = true, LeftLowerArm = true, LeftHand = true,
+		RightUpperArm = true, RightLowerArm = true, RightHand = true,
+		LeftUpperLeg = true, LeftLowerLeg = true, LeftFoot = true,
+		RightUpperLeg = true, RightLowerLeg = true, RightFoot = true,
+	}
+
+	local function getTungDescription(): HumanoidDescription
+		if cachedTungDescription then
+			return cachedTungDescription:Clone()
+		end
+
+		local details = AssetService:GetBundleDetailsAsync(TUNG_BUNDLE_ID)
+		local outfitId: number? = nil
+		for _, item in ipairs(details.Items) do
+			if item.Type == "UserOutfit" then
+				outfitId = item.Id
+				break
+			end
+		end
+		if not outfitId then
+			error("bundle contains no UserOutfit")
+		end
+
+		local description = Players:GetHumanoidDescriptionFromOutfitIdAsync(outfitId)
+		cachedTungDescription = description:Clone()
+		return description
+	end
+
+	local function hideTungPart(part: BasePart)
+		if savedTungTransparency[part] == nil then
+			savedTungTransparency[part] = {
+				transparency = part.Transparency,
+				localTransparency = part.LocalTransparencyModifier,
+			}
+		end
+		part.Transparency = 1
+		part.LocalTransparencyModifier = 1
+	end
+
+	local function hideOriginalAvatar(character: Model)
+		for name in pairs(BODY_PART_NAMES) do
+			local part = character:FindFirstChild(name)
+			if part and part:IsA("BasePart") then hideTungPart(part) end
+		end
+
+		for _, child in ipairs(character:GetChildren()) do
+			if child:IsA("Accessory") then
+				for _, descendant in ipairs(child:GetDescendants()) do
+					if descendant:IsA("BasePart") then hideTungPart(descendant) end
+				end
+			end
+		end
+
+		-- Project Delta welds its equipped shirt/pants meshes into Models named
+		-- after the inventory values referenced by Character.Clothing.
+		local clothing = character:FindFirstChild("Clothing")
+		if clothing then
+			for _, slot in ipairs(clothing:GetChildren()) do
+				if slot:IsA("ObjectValue") and slot.Value then
+					local visual = character:FindFirstChild(slot.Value.Name)
+					if visual then
+						for _, descendant in ipairs(visual:GetDescendants()) do
+							if descendant:IsA("BasePart") then hideTungPart(descendant) end
+						end
+					end
+				end
+			end
+		end
+	end
+
+	local function destroyTung()
+		for part, state in pairs(savedTungTransparency) do
+			if part.Parent then
+				part.Transparency = state.transparency
+				part.LocalTransparencyModifier = state.localTransparency
+			end
+		end
+		table.clear(savedTungTransparency)
+		if tungProxy then tungProxy:Destroy() end
+		tungProxy = nil
+		tungCharacter = nil
+		table.clear(tungMotors)
+		table.clear(tungParts)
+	end
+
+	local function applyTung(character: Model)
+		if tungBusy then return end
+		tungBusy = true
+		tungFailureCharacter = nil
+
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		if not humanoid then
+			tungBusy = false
+			return
+		end
+		if humanoid.RigType ~= Enum.HumanoidRigType.R15 then
+			notify("Tung", "Triple T requires an R15 character.")
+			tungFailureCharacter = character
+			tungBusy = false
+			return
+		end
+
+		local ok, descriptionOrError = pcall(getTungDescription)
+		if not ok then
+			notify("Tung", "Could not load bundle: " .. tostring(descriptionOrError))
+			tungFailureCharacter = character
+			tungBusy = false
+			return
+		end
+
+		if not tungEnabled:Get() or character ~= getCharacter() then
+			(descriptionOrError :: HumanoidDescription):Destroy()
+			tungBusy = false
+			return
+		end
+
+		local description = descriptionOrError :: HumanoidDescription
+		local created, proxyOrError = pcall(function()
+			return Players:CreateHumanoidModelFromDescriptionAsync(
+				description,
+				Enum.HumanoidRigType.R15,
+				Enum.AssetTypeVerification.Always
+			)
+		end)
+		description:Destroy()
+		if not created then
+			notify("Tung", "Could not create bundle rig: " .. tostring(proxyOrError))
+			tungFailureCharacter = character
+			tungBusy = false
+			return
+		end
+
+		local proxy = proxyOrError :: Model
+		if not tungEnabled:Get() or character ~= getCharacter() then
+			proxy:Destroy()
+			tungBusy = false
+			return
+		end
+
+		proxy.Name = "TungProxy"
+		for _, descendant in ipairs(proxy:GetDescendants()) do
+			if descendant:IsA("Script") or descendant:IsA("LocalScript") or descendant:IsA("ModuleScript") then
+				descendant:Destroy()
+			elseif descendant:IsA("BasePart") then
+				table.insert(tungParts, descendant)
+				descendant.Anchored = descendant.Name == "HumanoidRootPart"
+				descendant.CanCollide = false
+				descendant.CanQuery = false
+				descendant.CanTouch = false
+				descendant.Massless = true
+				if descendant.Name == "HumanoidRootPart" then descendant.Transparency = 1 end
+			elseif descendant:IsA("Motor6D") or descendant:IsA("AnimationConstraint") then
+				tungMotors[descendant.Name] = descendant
+			end
+		end
+
+		local proxyHumanoid = proxy:FindFirstChildOfClass("Humanoid")
+		if proxyHumanoid then
+			proxyHumanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+			proxyHumanoid.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
+			proxyHumanoid.NameDisplayDistance = 0
+			proxyHumanoid.EvaluateStateMachine = false
+		end
+
+		local sourceRoot = character:FindFirstChild("HumanoidRootPart")
+		if sourceRoot and sourceRoot:IsA("BasePart") then proxy:PivotTo(sourceRoot.CFrame) end
+		proxy.Parent = Workspace
+		tungProxy = proxy
+		tungCharacter = character
+		hideOriginalAvatar(character)
+		tungBusy = false
+
+		if not tungEnabled:Get() or character ~= getCharacter() then
+			destroyTung()
+		end
+	end
+
+	local rsTung = RunService.RenderStepped:Connect(function()
+		if not tungEnabled:Get() then
+			tungFailureCharacter = nil
+			if tungCharacter and not tungBusy then
+				tungBusy = true
+				destroyTung()
+				tungBusy = false
+			end
+			return
+		end
+
+		local character = getCharacter()
+		if character and character ~= tungCharacter and character ~= tungFailureCharacter and not tungBusy then
+			task.spawn(applyTung, character)
+		elseif character and tungProxy then
+			for _, part in ipairs(tungParts) do
+				part.CanCollide = false
+				part.CanQuery = false
+				part.CanTouch = false
+			end
+			local sourceRoot = character:FindFirstChild("HumanoidRootPart")
+			if sourceRoot and sourceRoot:IsA("BasePart") then
+				tungProxy:PivotTo(sourceRoot.CFrame)
+			end
+			for _, descendant in ipairs(character:GetDescendants()) do
+				if descendant:IsA("Motor6D") or descendant:IsA("AnimationConstraint") then
+					local target = tungMotors[descendant.Name]
+					if target then target.Transform = descendant.Transform end
+				end
+			end
+			hideOriginalAvatar(character)
+		end
+	end)
+	table.insert(cleanups, function()
+		rsTung:Disconnect()
+		if not tungBusy then destroyTung() end
+		if cachedTungDescription then cachedTungDescription:Destroy() end
+	end)
+
+	CFG.toggles.tung_enabled = tungEnabled
 end
 
 ----------------------------------------------------------------------------------
