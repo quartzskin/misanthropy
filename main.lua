@@ -9645,15 +9645,8 @@ end
 
 Library.MenuKeybind = "None" -- single source of truth: the nhack toggle/keybind below
 
-local nhack = getgenv().Nhack
-local uiToggleSec
-if nhack and type(nhack.AddTab) == "function" then
-	local NhackTab = nhack:AddTab("misanthropy")
-	uiToggleSec = NhackTab:Section("misanthropy UI")
-else
-	local uiPage = Window:Page({ Name = "Settings" }):SubPage({ Name = "Settings" })
-	uiToggleSec = uiPage:Section({ Name = "misanthropy UI", Side = 1 })
-end
+local NhackTab = getgenv().Nhack:AddTab("misanthropy")
+local uiToggleSec = NhackTab:Section("misanthropy UI")
 local uiToggle = uiToggleSec:Toggle({
 	Name = "Show UI",
 	Default = true,
@@ -9710,20 +9703,6 @@ end
 
 local cleanups: { () -> () } = {}
 local CFG = { toggles = {}, sliders = {}, dropdowns = {}, colors = {} }
-
--- The vendored UI only cleans its own connections. Run feature cleanups too so
--- re-executing the file does not leave old effects or RenderStepped loops alive.
-do
-	local baseExit = Library.Exit
-	Library.Exit = function(self)
-		for i = #cleanups, 1, -1 do
-			pcall(cleanups[i])
-		end
-		table.clear(cleanups)
-		if screen then screen:Destroy() end
-		baseExit(self)
-	end
-end
 
 local function newColorpicker(parent: any, opts: any): any
 	local picker = parent:Label({ Name = opts.Name }):Colorpicker({
@@ -11650,249 +11629,6 @@ do
 	CFG.dropdowns.ms_material = msMaterial; CFG.dropdowns.ms_overlay_type = msOverlayType
 	CFG.dropdowns.ms_spin_axis = msSpinAxis
 	CFG.colors.ms_matcolor = msMatColor
-end
-
-----------------------------------------------------------------------------------
--- SECTION 5h: Tung
-----------------------------------------------------------------------------------
-do
-	local tungSec = newSection(pgCharacter, "Tung")
-	local tungEnabled = tungSec:Toggle({
-		Name = "Enabled",
-		Default = false,
-		Flag = "tung_enabled",
-	})
-
-	local TUNG_BUNDLE_ID = 169035278976453
-	local AssetService = game:GetService("AssetService")
-	local cachedTungDescription: HumanoidDescription? = nil
-	local tungProxy: Model? = nil
-	local tungCharacter: Model? = nil
-	local tungBusy = false
-	local tungFailureCharacter: Model? = nil
-	local tungMotors: { [string]: Motor6D | AnimationConstraint } = {}
-	local tungParts: { BasePart } = {}
-	local savedTungTransparency: { [BasePart]: { transparency: number, localTransparency: number } } = {}
-	local BODY_PART_NAMES = {
-		Head = true,
-		UpperTorso = true, LowerTorso = true,
-		LeftUpperArm = true, LeftLowerArm = true, LeftHand = true,
-		RightUpperArm = true, RightLowerArm = true, RightHand = true,
-		LeftUpperLeg = true, LeftLowerLeg = true, LeftFoot = true,
-		RightUpperLeg = true, RightLowerLeg = true, RightFoot = true,
-	}
-
-	local function getTungDescription(): HumanoidDescription
-		if cachedTungDescription then
-			return cachedTungDescription:Clone()
-		end
-
-		local details = AssetService:GetBundleDetailsAsync(TUNG_BUNDLE_ID)
-		local outfitId: number? = nil
-		for _, item in ipairs(details.Items) do
-			if item.Type == "UserOutfit" then
-				outfitId = item.Id
-				break
-			end
-		end
-		if not outfitId then
-			error("bundle contains no UserOutfit")
-		end
-
-		local description = Players:GetHumanoidDescriptionFromOutfitIdAsync(outfitId)
-		cachedTungDescription = description:Clone()
-		return description
-	end
-
-	local function hideTungPart(part: BasePart)
-		if savedTungTransparency[part] == nil then
-			savedTungTransparency[part] = {
-				transparency = part.Transparency,
-				localTransparency = part.LocalTransparencyModifier,
-			}
-		end
-		part.Transparency = 1
-		part.LocalTransparencyModifier = 1
-	end
-
-	local function hideOriginalAvatar(character: Model)
-		for name in pairs(BODY_PART_NAMES) do
-			local part = character:FindFirstChild(name)
-			if part and part:IsA("BasePart") then hideTungPart(part) end
-		end
-
-		for _, child in ipairs(character:GetChildren()) do
-			if child:IsA("Accessory") then
-				for _, descendant in ipairs(child:GetDescendants()) do
-					if descendant:IsA("BasePart") then hideTungPart(descendant) end
-				end
-			end
-		end
-
-		-- Project Delta welds its equipped shirt/pants meshes into Models named
-		-- after the inventory values referenced by Character.Clothing.
-		local clothing = character:FindFirstChild("Clothing")
-		if clothing then
-			for _, slot in ipairs(clothing:GetChildren()) do
-				if slot:IsA("ObjectValue") and slot.Value then
-					local visual = character:FindFirstChild(slot.Value.Name)
-					if visual then
-						for _, descendant in ipairs(visual:GetDescendants()) do
-							if descendant:IsA("BasePart") then hideTungPart(descendant) end
-						end
-					end
-				end
-			end
-		end
-	end
-
-	local function destroyTung()
-		for part, state in pairs(savedTungTransparency) do
-			if part.Parent then
-				part.Transparency = state.transparency
-				part.LocalTransparencyModifier = state.localTransparency
-			end
-		end
-		table.clear(savedTungTransparency)
-		if tungProxy then tungProxy:Destroy() end
-		tungProxy = nil
-		tungCharacter = nil
-		table.clear(tungMotors)
-		table.clear(tungParts)
-	end
-
-	local function applyTung(character: Model)
-		if tungBusy then return end
-		tungBusy = true
-		tungFailureCharacter = nil
-
-		local humanoid = character:FindFirstChildOfClass("Humanoid")
-		if not humanoid then
-			tungBusy = false
-			return
-		end
-		if humanoid.RigType ~= Enum.HumanoidRigType.R15 then
-			notify("Tung", "Triple T requires an R15 character.")
-			tungFailureCharacter = character
-			tungBusy = false
-			return
-		end
-
-		local ok, descriptionOrError = pcall(getTungDescription)
-		if not ok then
-			notify("Tung", "Could not load bundle: " .. tostring(descriptionOrError))
-			tungFailureCharacter = character
-			tungBusy = false
-			return
-		end
-
-		if not tungEnabled:Get() or character ~= getCharacter() then
-			(descriptionOrError :: HumanoidDescription):Destroy()
-			tungBusy = false
-			return
-		end
-
-		local description = descriptionOrError :: HumanoidDescription
-		local created, proxyOrError = pcall(function()
-			return Players:CreateHumanoidModelFromDescriptionAsync(
-				description,
-				Enum.HumanoidRigType.R15,
-				Enum.AssetTypeVerification.Always
-			)
-		end)
-		description:Destroy()
-		if not created then
-			notify("Tung", "Could not create bundle rig: " .. tostring(proxyOrError))
-			tungFailureCharacter = character
-			tungBusy = false
-			return
-		end
-
-		local proxy = proxyOrError :: Model
-		if not tungEnabled:Get() or character ~= getCharacter() then
-			proxy:Destroy()
-			tungBusy = false
-			return
-		end
-
-		proxy.Name = "TungProxy"
-		for _, descendant in ipairs(proxy:GetDescendants()) do
-			if descendant:IsA("Script") or descendant:IsA("LocalScript") or descendant:IsA("ModuleScript") then
-				descendant:Destroy()
-			elseif descendant:IsA("BasePart") then
-				table.insert(tungParts, descendant)
-				descendant.Anchored = descendant.Name == "HumanoidRootPart"
-				descendant.CanCollide = false
-				descendant.CanQuery = false
-				descendant.CanTouch = false
-				descendant.Massless = true
-				if descendant.Name == "HumanoidRootPart" then descendant.Transparency = 1 end
-			elseif descendant:IsA("Motor6D") or descendant:IsA("AnimationConstraint") then
-				tungMotors[descendant.Name] = descendant
-			end
-		end
-
-		local proxyHumanoid = proxy:FindFirstChildOfClass("Humanoid")
-		if proxyHumanoid then
-			proxyHumanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
-			proxyHumanoid.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
-			proxyHumanoid.NameDisplayDistance = 0
-			proxyHumanoid.EvaluateStateMachine = false
-		end
-
-		local sourceRoot = character:FindFirstChild("HumanoidRootPart")
-		if sourceRoot and sourceRoot:IsA("BasePart") then proxy:PivotTo(sourceRoot.CFrame) end
-		proxy.Parent = Workspace
-		tungProxy = proxy
-		tungCharacter = character
-		hideOriginalAvatar(character)
-		tungBusy = false
-
-		if not tungEnabled:Get() or character ~= getCharacter() then
-			destroyTung()
-		end
-	end
-
-	local rsTung = RunService.RenderStepped:Connect(function()
-		if not tungEnabled:Get() then
-			tungFailureCharacter = nil
-			if tungCharacter and not tungBusy then
-				tungBusy = true
-				destroyTung()
-				tungBusy = false
-			end
-			return
-		end
-
-		local character = getCharacter()
-		if character and character ~= tungCharacter and character ~= tungFailureCharacter and not tungBusy then
-			task.spawn(applyTung, character)
-		elseif character and tungProxy then
-			for _, part in ipairs(tungParts) do
-				part.CanCollide = false
-				part.CanQuery = false
-				part.CanTouch = false
-			end
-			local sourceRoot = character:FindFirstChild("HumanoidRootPart")
-			if sourceRoot and sourceRoot:IsA("BasePart") then
-				tungProxy:PivotTo(sourceRoot.CFrame)
-			end
-			for _, descendant in ipairs(character:GetDescendants()) do
-				if descendant:IsA("Motor6D") or descendant:IsA("AnimationConstraint") then
-					local target = tungMotors[descendant.Name]
-					if target then target.Transform = descendant.Transform end
-				end
-			end
-			hideOriginalAvatar(character)
-		end
-	end)
-	table.insert(cleanups, function()
-		rsTung:Disconnect()
-		if not tungBusy then destroyTung() end
-		if cachedTungDescription then cachedTungDescription:Destroy() end
-	end)
-
-	CFG.toggles.tung_enabled = tungEnabled
 end
 
 ----------------------------------------------------------------------------------
@@ -15212,6 +14948,811 @@ do
 	vsSec:Button({ Name = "Sort Vault", Callback = function()
 		task.spawn(sortVault)
 	end })
+end
+
+----------------------------------------------------------------------------------
+-- SECTION 5z: Ruble Tools (Split + Trade Dupe)
+----------------------------------------------------------------------------------
+do
+    local rtSec = newSection(pgUtility, "Ruble Tools")
+
+    -- Grab game services
+    local Players = game:GetService("Players")
+    local RS = game:GetService("ReplicatedStorage")
+    local UIS = game:GetService("UserInputService")
+    local LP = Players.LocalPlayer
+
+    -- Remote refs
+    local InventoryMove = RS:WaitForChild("Remotes"):WaitForChild("InventoryMove")
+    local Trade = RS:WaitForChild("Remotes"):WaitForChild("Trade")
+    local playerData = RS:WaitForChild("Players"):WaitForChild(LP.Name)
+    local playerInventory = playerData:WaitForChild("Inventory")
+
+    -- Shared config
+    local RT_CFG = {
+        SplitDelay = 0.03,
+        ConfirmTimeout = 0.35,
+        MaxMoves = 500,
+        DupeSlots = 6,
+        PreferContainer = "",
+        PreferItem = "",
+    }
+
+    -- Shared helpers (ported verbatim)
+    local function rtGetAmount(obj)
+        return tonumber(obj:GetAttribute("Amount")) or 1
+    end
+
+    local function rtNameMatch(inst, prefer)
+        if type(prefer) ~= "string" or prefer == "" then return true end
+        return string.find(string.lower(inst.Name), string.lower(prefer), 1, true) ~= nil
+    end
+
+    local function rtMatchesItem(obj, filter, exact)
+        if not obj then return false end
+        if filter == nil or filter == "" then return true end
+        if exact then
+            if obj.Name == filter then return true end
+            if obj:IsA("ObjectValue") and obj.Value and obj.Value.Name == filter then return true end
+            return false
+        end
+        if rtNameMatch(obj, filter) then return true end
+        if obj:IsA("ObjectValue") and obj.Value and rtNameMatch(obj.Value, filter) then return true end
+        return false
+    end
+
+    local function rtSlotPrefix(slot)
+        if type(slot) ~= "string" then return nil end
+        local p = string.gsub(slot, "%d+", "")
+        return p ~= "" and p or nil
+    end
+
+    -- SPLIT functions
+    local CLOTHING_SLOTS = {
+        "ClothingBackpack",
+        "ClothingShirt",
+        "ClothingPants",
+        "ClothingChestRig",
+    }
+
+    local PREFIX_FOR_EQUIP = {
+        ClothingBackpack = "Backpack",
+        ClothingShirt = "Shirt",
+        ClothingPants = "Pants",
+        ClothingChestRig = "ChestRig",
+    }
+
+    local DEFAULT_CAP = {
+        Backpack = 35,
+        Shirt = 8,
+        Pants = 6,
+        ChestRig = 10,
+        Material = 12,
+        Container = 40,
+    }
+
+    local function rtOccupiedMap(inventory)
+        local occupied = {}
+        for _, obj in ipairs(inventory:GetChildren()) do
+            local slot = obj:GetAttribute("Slot")
+            if type(slot) == "string" then
+                occupied[slot] = true
+            end
+        end
+        return occupied
+    end
+
+    local function rtGetClothingInventory(equipSlotName)
+        for _, obj in ipairs(playerInventory:GetChildren()) do
+            if obj:GetAttribute("Slot") == equipSlotName then
+                local inv = obj:FindFirstChild("Inventory")
+                if inv then return inv end
+            end
+        end
+        return nil
+    end
+
+    local function rtCollectStorageInventories()
+        local list, seen = {}, {}
+        local function add(inv, label, defaultPrefix)
+            if inv and not seen[inv] then
+                seen[inv] = true
+                table.insert(list, { inv = inv, label = label, prefix = defaultPrefix })
+            end
+        end
+        for _, equip in ipairs(CLOTHING_SLOTS) do
+            add(rtGetClothingInventory(equip), equip, PREFIX_FOR_EQUIP[equip])
+        end
+        for _, obj in ipairs(playerInventory:GetChildren()) do
+            local inv = obj:FindFirstChild("Inventory")
+            if inv then
+                local equipSlot = obj:GetAttribute("Slot")
+                local prefix = PREFIX_FOR_EQUIP[equipSlot] or rtSlotPrefix(equipSlot) or "Backpack"
+                prefix = string.gsub(prefix, "^Clothing", "")
+                if prefix == "" then prefix = "Backpack" end
+                add(inv, tostring(equipSlot or obj.Name), prefix)
+            end
+        end
+        add(playerInventory, "Root", "Material")
+        return list
+    end
+
+    local function rtFindBiggestStack(storageList, itemFilter, exact)
+        local best, bestAmt = nil, 0
+        local scanned = {}
+        local function scan(inv)
+            if not inv or scanned[inv] then return end
+            scanned[inv] = true
+            for _, obj in ipairs(inv:GetChildren()) do
+                if rtMatchesItem(obj, itemFilter, exact) and obj:GetAttribute("Slot") then
+                    local amt = rtGetAmount(obj)
+                    if amt > bestAmt then
+                        bestAmt = amt
+                        best = obj
+                    end
+                end
+                local sub = obj:FindFirstChild("Inventory")
+                if sub then scan(sub) end
+            end
+        end
+        for _, entry in ipairs(storageList) do
+            scan(entry.inv)
+        end
+        return best, bestAmt
+    end
+
+    local function rtCapacityFor(inv, prefix)
+        local cap = tonumber(inv:GetAttribute(prefix))
+        if cap and cap > 0 then return math.floor(cap) end
+        local maxIdx = 0
+        for _, obj in ipairs(inv:GetChildren()) do
+            local slot = obj:GetAttribute("Slot")
+            if type(slot) == "string" and rtSlotPrefix(slot) == prefix then
+                local n = tonumber(string.match(slot, "%d+"))
+                if n and n > maxIdx then maxIdx = n end
+            end
+        end
+        local fallback = DEFAULT_CAP[prefix] or 0
+        if maxIdx > 0 then return math.max(maxIdx, fallback) end
+        return fallback
+    end
+
+    local function rtPrefixForEntry(entry, fromInv, fromSlot)
+        if entry.inv == fromInv then
+            return rtSlotPrefix(fromSlot) or entry.prefix
+        end
+        return entry.prefix
+    end
+
+    local function rtBuildFreeQueue(fromInv, fromSlot, storageList, rejected)
+        local queue = {}
+        rejected = rejected or {}
+        local function addFrom(entry)
+            local prefix = rtPrefixForEntry(entry, fromInv, fromSlot)
+            if not prefix then return end
+            local cap = rtCapacityFor(entry.inv, prefix)
+            if cap <= 0 then return end
+            local occupied = rtOccupiedMap(entry.inv)
+            for i = 1, cap do
+                local name = prefix .. i
+                local key = tostring(entry.inv) .. ":" .. name
+                if not occupied[name]
+                    and not rejected[key]
+                    and not (entry.inv == fromInv and name == fromSlot)
+                then
+                    table.insert(queue, { inv = entry.inv, slot = name, key = key })
+                end
+            end
+        end
+        for _, entry in ipairs(storageList) do
+            if entry.inv == fromInv then addFrom(entry) end
+        end
+        for _, entry in ipairs(storageList) do
+            if entry.inv ~= fromInv and entry.label ~= "Root" then
+                addFrom(entry)
+            end
+        end
+        return queue
+    end
+
+    local function rtWaitAmountDrop(stack, prevAmount)
+        if not stack or not stack.Parent then return true end
+        if rtGetAmount(stack) < prevAmount then return true end
+        local done = false
+        local conn = stack:GetAttributeChangedSignal("Amount"):Connect(function()
+            if rtGetAmount(stack) < prevAmount then done = true end
+        end)
+        local t0 = tick()
+        while not done and stack.Parent and (tick() - t0) < RT_CFG.ConfirmTimeout do
+            if rtGetAmount(stack) < prevAmount then done = true break end
+            task.wait()
+        end
+        conn:Disconnect()
+        return done
+    end
+
+    -- DUPE functions
+    local function rtIsContainerLike(inst)
+        if not inst or inst.Name == "Inventory" then return false end
+        return inst:FindFirstChild("Inventory") ~= nil
+    end
+
+    local function rtCollectContainers(rootInv)
+        local list, seen = {}, {}
+        local function add(inst)
+            if inst and rtIsContainerLike(inst) and not seen[inst] then
+                seen[inst] = true
+                table.insert(list, inst)
+            end
+        end
+        for _, child in ipairs(rootInv:GetChildren()) do
+            add(child)
+            local nested = child:FindFirstChild("Inventory")
+            if nested then
+                for _, inner in ipairs(nested:GetChildren()) do
+                    add(inner)
+                end
+            end
+        end
+        return list
+    end
+
+    local function rtCollectStoredItems(container)
+        local nested = container:FindFirstChild("Inventory")
+        local items = {}
+        if not nested then return items end
+        for _, child in ipairs(nested:GetChildren()) do
+            if child.Name ~= "Inventory" and child.Name ~= "ItemProperties" and child.Name ~= "Attachments" then
+                table.insert(items, child)
+            end
+        end
+        return items
+    end
+
+    -- Live item selection state
+    local selectedItemName = nil
+    local selectedExact = true
+
+    local function rtPickDupeItem(itemFilterOverride, exact)
+        local preferContainer = RT_CFG.PreferContainer
+        local preferItem = itemFilterOverride
+        if preferItem == nil then preferItem = RT_CFG.PreferItem end
+        if exact == nil then
+            exact = selectedExact and preferItem ~= nil and preferItem ~= ""
+        end
+        local containers = rtCollectContainers(playerInventory)
+        if #containers == 0 then
+            return nil, "No bag/shirt storage found"
+        end
+        local best, bestContainer, bestAmt = nil, nil, -1
+        local function scan(respectBagFilter)
+            for _, container in ipairs(containers) do
+                if respectBagFilter and preferContainer ~= "" and not rtNameMatch(container, preferContainer) then
+                    -- skip
+                else
+                    for _, it in ipairs(rtCollectStoredItems(container)) do
+                        if rtMatchesItem(it, preferItem, exact) then
+                            local amt = rtGetAmount(it)
+                            if amt > bestAmt then
+                                bestAmt = amt
+                                best = it
+                                bestContainer = container
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        scan(true)
+        if not best and preferContainer ~= "" then
+            scan(false)
+        end
+        if not best then
+            local label = (preferItem ~= "" and preferItem) or "item"
+            return nil, "No " .. label .. " in bag/shirt storage"
+        end
+        return best, nil, bestContainer, bestAmt
+    end
+
+    -- UI - status label
+    local statusLabel = rtSec:Label({ Name = "Ready" })
+
+    local function rtSetStatus(text)
+        statusLabel:SetText(text)
+    end
+
+    -- Inventory scanner for stackable items
+    local function rtDisplayItemName(obj)
+        if obj:IsA("ObjectValue") and obj.Value then
+            return obj.Value.Name
+        end
+        return obj.Name
+    end
+
+    local function rtIsStackableLive(obj)
+        if not obj or not obj:GetAttribute("Slot") then return false end
+        return obj:GetAttribute("Amount") ~= nil
+    end
+
+    local function rtScanInventoryStacks()
+        local byName = {}
+        local scanned = {}
+        local function consider(obj)
+            if not rtIsStackableLive(obj) then return end
+            local amt = rtGetAmount(obj)
+            if amt < 1 then return end
+            local name = rtDisplayItemName(obj)
+            local entry = byName[name]
+            if not entry then
+                entry = { name = name, total = 0, biggest = 0, stacks = 0 }
+                byName[name] = entry
+            end
+            entry.total = entry.total + amt
+            entry.stacks = entry.stacks + 1
+            if amt > entry.biggest then entry.biggest = amt end
+        end
+        local function scan(inv)
+            if not inv or scanned[inv] then return end
+            scanned[inv] = true
+            for _, obj in ipairs(inv:GetChildren()) do
+                consider(obj)
+                local sub = obj:FindFirstChild("Inventory")
+                if sub then scan(sub) end
+            end
+        end
+        for _, entry in ipairs(rtCollectStorageInventories()) do
+            scan(entry.inv)
+        end
+        local list = {}
+        for _, entry in pairs(byName) do
+            table.insert(list, entry)
+        end
+        table.sort(list, function(a, b)
+            if a.biggest ~= b.biggest then return a.biggest > b.biggest end
+            return a.name < b.name
+        end)
+        return list
+    end
+
+    -- Create the item selection dropdown
+    local itemNames = { "None" }
+    local itemDropdown = rtSec:Dropdown({
+        Name = "Item to split/dupe",
+        Flag = "rt_item_dropdown",
+        Items = itemNames,
+        Default = "None",
+        Multi = false,
+        Callback = function(value)
+            if value and value ~= "None" then
+                selectedItemName = value
+                RT_CFG.PreferItem = value
+                rtSetStatus("Selected: " .. value)
+            else
+                selectedItemName = nil
+                RT_CFG.PreferItem = ""
+                rtSetStatus("No item selected")
+            end
+        end
+    })
+
+    -- Refresh button for inventory
+    local function rtRefreshItemList()
+        local stacks = rtScanInventoryStacks()
+        local names = { "None" }
+        for _, entry in ipairs(stacks) do
+            table.insert(names, entry.name)
+        end
+        itemDropdown:Refresh(names)
+        -- Re-select if still there
+        if selectedItemName then
+            local found = false
+            for _, name in ipairs(names) do
+                if name == selectedItemName then found = true; break end
+            end
+            if found then
+                itemDropdown:Set(selectedItemName)
+            else
+                itemDropdown:Set("None")
+                selectedItemName = nil
+                RT_CFG.PreferItem = ""
+                rtSetStatus("Selected item no longer available")
+            end
+        else
+            itemDropdown:Set("None")
+        end
+    end
+
+    rtSec:Button({
+        Name = "Refresh inventory",
+        Callback = function()
+            rtRefreshItemList()
+            rtSetStatus("Inventory refreshed")
+        end
+    })
+
+    -- Split button
+    local function rtResolveSplitFilter(itemFilter)
+        if itemFilter and itemFilter ~= "" then
+            return itemFilter, true
+        end
+        if selectedItemName and selectedItemName ~= "" then
+            return selectedItemName, true
+        end
+        RT_CFG.PreferItem = itemDropdown:Get() or ""
+        if RT_CFG.PreferItem ~= "" and RT_CFG.PreferItem ~= "None" then
+            return RT_CFG.PreferItem, true
+        end
+        return nil, true
+    end
+
+    local function rtRunSplit(itemFilter)
+        local filter, exact = rtResolveSplitFilter(itemFilter)
+        if not filter or filter == "" or filter == "None" then
+            rtSetStatus("Select an item from the dropdown first")
+            return false
+        end
+
+        local storage = rtCollectStorageInventories()
+        local stack, amt = rtFindBiggestStack(storage, filter, exact)
+        if not stack or amt <= 1 then
+            rtSetStatus(amt and amt > 0 and (filter .. " already split") or ("No " .. filter .. " found"))
+            return false
+        end
+
+        local fromSlot = stack:GetAttribute("Slot")
+        local fromInv = stack.Parent
+        if type(fromSlot) ~= "string" or not fromInv then
+            rtSetStatus("Stack missing Slot")
+            return false
+        end
+
+        local rejected = {}
+        local queue = rtBuildFreeQueue(fromInv, fromSlot, storage, rejected)
+        local qIndex = 1
+        rtSetStatus(string.format("Split %s: %d → %d empty", filter, amt, #queue))
+
+        local moved, failed = 0, 0
+        local tStart = tick()
+
+        while moved < RT_CFG.MaxMoves do
+            if not stack.Parent then
+                storage = rtCollectStorageInventories()
+                stack, amt = rtFindBiggestStack(storage, filter, exact)
+                if not stack or amt <= 1 then break end
+                fromSlot = stack:GetAttribute("Slot")
+                fromInv = stack.Parent
+                queue = rtBuildFreeQueue(fromInv, fromSlot, storage, rejected)
+                qIndex = 1
+            end
+
+            local cur = rtGetAmount(stack)
+            if cur <= 1 then
+                storage = rtCollectStorageInventories()
+                stack, amt = rtFindBiggestStack(storage, filter, exact)
+                if not stack or amt <= 1 then break end
+                fromSlot = stack:GetAttribute("Slot")
+                fromInv = stack.Parent
+                queue = rtBuildFreeQueue(fromInv, fromSlot, storage, rejected)
+                qIndex = 1
+                cur = rtGetAmount(stack)
+            end
+
+            local dest = queue[qIndex]
+            qIndex = qIndex + 1
+            if not dest then
+                storage = rtCollectStorageInventories()
+                queue = rtBuildFreeQueue(fromInv, fromSlot, storage, rejected)
+                qIndex = 1
+                dest = queue[qIndex]
+                qIndex = qIndex + 1
+                if not dest then
+                    rtSetStatus(string.format("No empty slots. Moves=%d", moved))
+                    return moved > 0
+                end
+            end
+
+            local prev = cur
+            local ok, err = pcall(function()
+                InventoryMove:FireServer(fromSlot, dest.slot, fromInv, dest.inv, 1)
+            end)
+
+            if not ok then
+                failed = failed + 1
+                rejected[dest.key] = true
+                if failed >= 5 then
+                    rtSetStatus("FireServer failed: " .. tostring(err))
+                    return false
+                end
+            elseif rtWaitAmountDrop(stack, prev) then
+                moved = moved + 1
+                failed = 0
+                if moved % 5 == 0 then
+                    local rate = moved / math.max(tick() - tStart, 0.001)
+                    rtSetStatus(string.format("Moved %d  (%.0f/s)  left~%d", moved, rate, rtGetAmount(stack)))
+                end
+            else
+                rejected[dest.key] = true
+                failed = failed + 1
+                if failed >= 20 then
+                    rtSetStatus(string.format("Stuck after %d moves", moved))
+                    return moved > 0
+                end
+                task.wait(0.05)
+            end
+
+            if RT_CFG.SplitDelay > 0 then
+                task.wait(RT_CFG.SplitDelay)
+            end
+        end
+
+        rtSetStatus(string.format("Split %s done. Moves=%d in %.1fs", filter, moved, tick() - tStart))
+        rtRefreshItemList()
+        return moved > 0
+    end
+
+    rtSec:Button({
+        Name = "SPLIT SELECTED → 1s",
+        Callback = function()
+            task.spawn(function()
+                rtRunSplit(selectedItemName)
+            end)
+        end
+    })
+
+    -- Dupe section
+    local dupeSettings = rtSec:Label({ Name = "Trade Dupe Settings" })
+
+    local dupeSlotsBox = rtSec:Textbox({
+        Name = "Dupe slots",
+        Flag = "rt_dupe_slots",
+        Default = "6",
+        Numeric = true,
+        Placeholder = "6"
+    })
+
+    local dupeBtn = rtSec:Button({
+        Name = "DUPE SELECTED / FILTER",
+        Callback = function()
+            task.spawn(function()
+                RT_CFG.DupeSlots = math.clamp(tonumber(dupeSlotsBox:Get()) or 6, 1, 12)
+                RT_CFG.PreferItem = selectedItemName or ""
+
+                local filter = selectedItemName
+                local exact = true
+                if not filter or filter == "" then
+                    filter = RT_CFG.PreferItem
+                    exact = false
+                end
+                if not filter or filter == "" or filter == "None" then
+                    rtSetStatus("Select an item first")
+                    return
+                end
+
+                local item, err, container, stackAmt = rtPickDupeItem(filter, exact)
+                if not item then
+                    rtSetStatus(err or "No item")
+                    return
+                end
+
+                local slots = RT_CFG.DupeSlots
+                local tradeList = {}
+                for _ = 1, slots do
+                    table.insert(tradeList, item)
+                end
+
+                rtSetStatus(string.format("Dupe %s (stack %d) x%d", item.Name, stackAmt or rtGetAmount(item), slots))
+
+                local ok1, e1 = pcall(function()
+                    Trade:InvokeServer({
+                        Action = "Update",
+                        TradeList = tradeList,
+                    })
+                end)
+                if not ok1 then
+                    rtSetStatus("Update failed: " .. tostring(e1))
+                    return
+                end
+
+                local ok2, e2 = pcall(function()
+                    Trade:InvokeServer({
+                        Action = "Confirm",
+                    })
+                end)
+                if not ok2 then
+                    rtSetStatus("Confirm failed: " .. tostring(e2))
+                    return
+                end
+
+                rtSetStatus(string.format("Dupe sent: %s x%d", item.Name, slots))
+            end)
+        end
+    })
+
+    -- Combo button: Split then Dupe
+    rtSec:Button({
+        Name = "SPLIT THEN DUPE SELECTED",
+        Callback = function()
+            local name = selectedItemName
+            if not name or name == "" or name == "None" then
+                rtSetStatus("Select an item first")
+                return
+            end
+            task.spawn(function()
+                rtSetStatus("Split → then dupe " .. name .. "…")
+                rtRunSplit(name)
+                task.wait(0.15)
+                -- Run dupe
+                RT_CFG.DupeSlots = math.clamp(tonumber(dupeSlotsBox:Get()) or 6, 1, 12)
+                local item, err, container, stackAmt = rtPickDupeItem(name, true)
+                if not item then
+                    rtSetStatus(err or "No item after split")
+                    return
+                end
+                local slots = RT_CFG.DupeSlots
+                local tradeList = {}
+                for _ = 1, slots do
+                    table.insert(tradeList, item)
+                end
+                rtSetStatus(string.format("Dupe %s (stack %d) x%d", item.Name, stackAmt or rtGetAmount(item), slots))
+                local ok1, e1 = pcall(function()
+                    Trade:InvokeServer({
+                        Action = "Update",
+                        TradeList = tradeList,
+                    })
+                end)
+                if ok1 then
+                    local ok2, e2 = pcall(function()
+                        Trade:InvokeServer({
+                            Action = "Confirm",
+                        })
+                    end)
+                    if ok2 then
+                        rtSetStatus(string.format("Combo done: %s x%d", item.Name, slots))
+                    else
+                        rtSetStatus("Confirm failed: " .. tostring(e2))
+                    end
+                else
+                    rtSetStatus("Update failed: " .. tostring(e1))
+                end
+            end)
+        end
+    })
+
+    -- Auto-refresh every 2 seconds
+    local rtRefreshTimer = 0
+    local rsRt = RunService.Heartbeat:Connect(function(dt: number)
+        rtRefreshTimer = rtRefreshTimer + dt
+        if rtRefreshTimer >= 2.0 then
+            rtRefreshTimer = 0
+            if rtSec and rtSec.Items then
+                rtRefreshItemList()
+            end
+        end
+    end)
+    table.insert(cleanups, function()
+        if rsRt then rsRt:Disconnect() end
+    end)
+
+    -- Right-click context menu injection (ported)
+    local function rtSetupContextDupe()
+        local pg = LP:WaitForChild("PlayerGui", 30)
+        if not pg then return end
+        local mainGui = pg:WaitForChild("MainGui", 30)
+        if not mainGui then
+            warn("[RubleTools] MainGui missing — context Dupe not hooked")
+            return
+        end
+        local modules = mainGui:WaitForChild("Modules", 10)
+        local invMod = modules and modules:FindFirstChild("InventoryFunctions")
+        if not invMod then
+            warn("[RubleTools] InventoryFunctions missing")
+            return
+        end
+        local ok, InvFuncs = pcall(require, invMod)
+        if not ok or type(InvFuncs) ~= "table" or type(InvFuncs.MakeInteractionList) ~= "function" then
+            warn("[RubleTools] Could not hook MakeInteractionList")
+            return
+        end
+        local interactionFrame = mainGui:WaitForChild("MainFrame"):WaitForChild("InteractionFrame")
+        local list = interactionFrame:WaitForChild("InteractionListInventory")
+        local drop = list:WaitForChild("Drop")
+
+        local dupeCtx = list:FindFirstChild("Dupe")
+        if dupeCtx then dupeCtx:Destroy() end
+        dupeCtx = drop:Clone()
+        dupeCtx.Name = "Dupe"
+        dupeCtx.LayoutOrder = 0
+        dupeCtx.Visible = false
+        dupeCtx.Parent = list
+
+        local tb = dupeCtx:FindFirstChild("TextButton")
+        if tb and tb:IsA("TextButton") then tb.Text = "" end
+        local decor = dupeCtx:FindFirstChild("Decor")
+        if decor and decor:IsA("TextLabel") then
+            decor.Text = "Dupe"
+            pcall(function()
+                decor.FontFace = Font.new("rbxasset://fonts/families/SourceSansPro.json", Enum.FontWeight.SemiBold)
+            end)
+            decor.TextSize = 14
+        else
+            for _, d in ipairs(dupeCtx:GetDescendants()) do
+                if d:IsA("TextLabel") and (d.Text == "Drop" or d.Name == "Decor") then
+                    d.Text = "Dupe"
+                end
+            end
+        end
+
+        local connected = false
+        local contextItem = nil
+        local function bindClick()
+            if connected then return end
+            local btn = dupeCtx:FindFirstChild("TextButton")
+            if not btn then return end
+            connected = true
+            btn.MouseButton1Down:Connect(function()
+                list.Visible = false
+                local item = contextItem
+                if not item or not item.Parent then
+                    rtSetStatus("No item selected")
+                    return
+                end
+                task.spawn(function()
+                    local slots = math.clamp(tonumber(dupeSlotsBox:Get()) or 6, 1, 12)
+                    local tradeList = {}
+                    for _ = 1, slots do
+                        table.insert(tradeList, item)
+                    end
+                    rtSetStatus(string.format("Dupe %s x%d (context)", item.Name, slots))
+                    local ok1, e1 = pcall(function()
+                        Trade:InvokeServer({
+                            Action = "Update",
+                            TradeList = tradeList,
+                        })
+                    end)
+                    if ok1 then
+                        local ok2, e2 = pcall(function()
+                            Trade:InvokeServer({
+                                Action = "Confirm",
+                            })
+                        end)
+                        if ok2 then
+                            rtSetStatus(string.format("Dupe sent: %s x%d", item.Name, slots))
+                        else
+                            rtSetStatus("Confirm failed: " .. tostring(e2))
+                        end
+                    else
+                        rtSetStatus("Update failed: " .. tostring(e1))
+                    end
+                end)
+            end)
+        end
+        bindClick()
+
+        local oldMake = InvFuncs.MakeInteractionList
+        InvFuncs.MakeInteractionList = function(self, item, ...)
+            contextItem = item
+            local results = table.pack(oldMake(self, item, ...))
+            if dupeCtx and dupeCtx.Parent then
+                dupeCtx.Visible = true
+                dupeCtx.Size = UDim2.fromScale(1, 0.1)
+                bindClick()
+            end
+            return table.unpack(results, 1, results.n)
+        end
+
+        print("[RubleTools] Right-click Dupe button hooked")
+    end
+
+    task.spawn(rtSetupContextDupe)
+
+    -- Initial refresh
+    rtRefreshItemList()
+    rtSetStatus("Ready — pick item from dropdown · split / trade-dupe")
+
+    -- Register cleanup
+    table.insert(cleanups, function()
+        if rsRt then rsRt:Disconnect() end
+    end)
 end
 
 ----------------------------------------------------------------------------------
