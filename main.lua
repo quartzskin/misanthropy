@@ -1,5 +1,5 @@
 ----------------------------------------------------------------------------------
--- EMBEDDED: UI library (vendored, Library.lua by @joestar._3 / sametexe001/sametlibs).
+-- EMBEDDED: UI library vendored from nhv2 <3
 ----------------------------------------------------------------------------------
 
 -- with love from:
