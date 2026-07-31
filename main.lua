@@ -1,24 +1,9 @@
---!strict
-
-
-
 ----------------------------------------------------------------------------------
 -- EMBEDDED: UI library (vendored, Library.lua by @joestar._3 / sametexe001/sametlibs).
--- ESPPreview/TargetIndicator/RadarWidget/ModeratorList stripped before vendoring.
--- Trailing top-level `return Library` removed (see CLAUDE.md for why).
 ----------------------------------------------------------------------------------
---[[
-    2/22/2026
-    Library.lua
-    Purpose:
-        NH ui library
 
-    Author: @joestar._3
-    Dependencies:
-        None
-]]
-
--- hi guys
+-- with love from:
+--			mandy, oxyhax, dot
 
 if getgenv().MisanthropyLandryUI and getgenv().MisanthropyLandryUI.Exit then
     getgenv().MisanthropyLandryUI:Exit()
